@@ -1,0 +1,13 @@
+{
+  "name": "nexus-chat",
+  "version": "1.0.0",
+  "description": "可自由接入任意 AI API 的在线聊天界面（OpenAI 兼容 / Anthropic / Gemini）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const t = JSON.parse(localStorage.getItem('nexus.settings') || '{}').theme;
+      if (t === 'light' || t === 'dark') document.querySelector('meta[name="color-scheme"]').content = t;
+    } catch {}
+  </script>
+  <title>Nexus Chat · 自由接入任意 AI API</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236366f1' d='M12 2 22 12 12 22 2 12z'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/style.css">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+<div class="app" id="app">
+  <!-- 左侧：对话列表 -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <div class="brand"><span class="logo">◆</span> Nexus Chat</div>
+      <button class="btn primary block" id="btnNewChat" type="button"><span data-icon="plus"></span>新对话</button>
+      <input class="input" id="searchConv" type="search" placeholder="搜索对话…" aria-label="搜索对话">
+    </div>
+    <nav class="conv-list" id="convList" aria-label="对话列表"></nav>
+    <div class="sidebar-foot">
+      <button class="btn ghost block" id="btnPrompts" type="button"><span data-icon="book"></span>提示词库</button>
+      <button class="btn ghost block" id="btnSettings" type="button"><span data-icon="gear"></span>设置与 API</button>
+    </div>
+  </aside>
+
+  <!-- 中间：聊天 -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn" id="btnToggleSidebar" type="button" aria-label="切换对话列表" title="对话列表"><span data-icon="menu"></span></button>
+      <div class="title-wrap">
+        <button class="chat-title" id="chatTitle" type="button" title="点击重命名">新对话</button>
+        <select class="model-select" id="selModel" aria-label="选择模型"></select>
+      </div>
+      <div class="top-pills">
+        <button class="pill-btn" id="topTempBtn" type="button" title="当前温度控制（点击调整）">🌡 0.7</button>
+        <button class="pill-btn" id="topCtxBtn" type="button" title="上下文窗口占用（点击查看明细）">📊 0%</button>
+      </div>
+      <button class="icon-btn" id="btnExportChat" type="button" aria-label="导出为 Markdown" title="导出为 Markdown"><span data-icon="download"></span></button>
+      <button class="icon-btn" id="btnTogglePanel" type="button" aria-label="切换参数面板" title="参数面板"><span data-icon="sliders"></span></button>
+    </header>
+
+    <section class="messages" id="messages" aria-live="polite"></section>
+
+    <footer class="composer-wrap">
+      <div class="composer" id="composer">
+        <div class="attach-list" id="attachList"></div>
+        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可粘贴/拖入图片或文件）" aria-label="消息输入"></textarea>
+        <div class="composer-bar">
+          <button class="icon-btn" id="btnAttach" type="button" aria-label="添加附件" title="添加图片或文本文件"><span data-icon="clip"></span></button>
+          <input type="file" id="fileInput" multiple hidden>
+          <div class="meter" id="meter" title="点击查看上下文窗口额度明细">
+            <div class="meter-bar" id="meterBar">
+              <i class="seg sys"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i>
+            </div>
+            <span class="meter-text" id="meterText"></span>
+          </div>
+          <span class="input-tokens" id="inputTokens"></span>
+          <button class="send-btn" id="btnSend" type="button" aria-label="发送"><span data-icon="send"></span></button>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <!-- 右侧：参数面板 -->
+  <aside class="panel" id="panel">
+    <div class="panel-head">
+      <h2>对话控制面板</h2>
+      <button class="icon-btn" id="btnClosePanel" type="button" aria-label="关闭面板"><span data-icon="x"></span></button>
+    </div>
+    <div class="panel-body">
+      <section class="card" id="cardCtx">
+        <h3>上下文窗口额度</h3>
+        <div class="ctx-detail" id="ctxDetail"></div>
+        <label class="field">
+          <span>窗口大小 (tokens)</span>
+          <input class="input" id="ctxWindow" type="number" min="512" step="1">
+        </label>
+        <div class="chips" id="ctxChips">
+          <button type="button" data-ctx="8192">8k</button>
+          <button type="button" data-ctx="32768">32k</button>
+          <button type="button" data-ctx="65536">64k</button>
+          <button type="button" data-ctx="128000">128k</button>
+          <button type="button" data-ctx="200000">200k</button>
+          <button type="button" data-ctx="1048576">1M</button>
+        </div>
+        <label class="field">
+          <span>携带历史消息条数 <small>(0 = 不限)</small></span>
+          <input class="input" id="maxHistory" type="number" min="0" step="1">
+        </label>
+        <label class="check"><input type="checkbox" id="autoTrim"> 超出窗口时自动截断最早的消息</label>
+      </section>
+
+      <section class="card" id="cardPrompt">
+        <div class="card-title">
+          <h3>系统提示词 (System Prompt)</h3>
+          <span class="dim" id="sysTokens"></span>
+        </div>
+        <textarea class="input sys-prompt" id="sysPrompt" rows="6" placeholder="例如：你是一位资深的软件工程师，回答简洁并给出示例代码。"></textarea>
+        <p class="hint">支持动态变量：<code>{{date}}</code>、<code>{{time}}</code>、<code>{{weekday}}</code>、<code>{{model}}</code></p>
+        <div class="row-btns">
+          <button class="btn sm" id="btnOpenPrompts" type="button"><span data-icon="book"></span>提示词库</button>
+          <button class="btn sm" id="btnSavePrompt" type="button">存为模板</button>
+          <button class="btn sm" id="btnClearPrompt" type="button">清空</button>
+        </div>
+      </section>
+
+      <section class="card" id="cardParams">
+        <h3>温度与生成控制</h3>
+        <div class="chips" id="tempChips">
+          <button type="button" data-temp="0">严谨 0</button>
+          <button type="button" data-temp="0.2">代码 0.2</button>
+          <button type="button" data-temp="0.7">平衡 0.7</button>
+          <button type="button" data-temp="1.2">创意 1.2</button>
+          <button type="button" data-temp="off">不传温度</button>
+        </div>
+        <div id="paramList"></div>
+        <label class="check"><input type="checkbox" id="streamToggle"> 流式输出 (Stream)</label>
+        <p class="hint">取消勾选某个参数后将不会发送给 API（如 o1/o3/R1 等推理模型可关闭温度）。</p>
+        <div class="row-btns">
+          <button class="btn sm" id="btnSaveDefault" type="button">设为新对话默认</button>
+          <button class="btn sm" id="btnResetParams" type="button">恢复默认</button>
+        </div>
+      </section>
+    </div>
+  </aside>
+  <div class="scrim" id="scrim"></div>
+</div>
+
+<!-- 设置对话框 -->
+<dialog class="dlg dlg-wide" id="dlgSettings" aria-labelledby="dlgSettingsTitle" closedby="any">
+  <div class="dlg-head">
+    <h2 id="dlgSettingsTitle">设置</h2>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="providers" aria-selected="true">API 提供商</button>
+      <button type="button" role="tab" data-tab="general" aria-selected="false">通用</button>
+      <button type="button" role="tab" data-tab="data" aria-selected="false">数据</button>
+    </div>
+    <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
+  </div>
+
+  <div class="dlg-body" data-panel="providers">
+    <div class="prov-layout">
+      <div class="prov-side">
+        <div class="prov-list" id="providerList"></div>
+        <select class="input" id="presetSelect" aria-label="添加提供商">
+          <option value="">＋ 添加提供商…</option>
+        </select>
+      </div>
+      <div class="prov-form" id="providerForm">
+        <div class="empty-hint" id="providerEmpty">从左下角添加一个 API 提供商开始。<br>支持 OpenAI 兼容协议（绝大多数国内外平台、OneAPI/NewAPI 中转站、Ollama）、Anthropic 与 Gemini 原生协议。</div>
+        <div id="providerFields" hidden>
+          <div class="grid2">
+            <label class="field"><span>名称</span><input class="input" id="pf_name"></label>
+            <label class="field"><span>协议类型</span><select class="input" id="pf_type"></select></label>
+          </div>
+          <label class="field">
+            <span>API 地址 (Base URL) <small>（裸域名自动补 <code>/v1</code>，末尾加 <code>#</code> 可禁用自动补全）</small></span>
+            <input class="input" id="pf_baseUrl" placeholder="https://api.example.com/v1" spellcheck="false">
+            <small class="endpoint-preview" id="pf_endpoint"></small>
+          </label>
+          <label class="field">
+            <span>API Key</span>
+            <div class="input-group">
+              <input class="input" id="pf_apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
+              <button class="btn sm" id="pf_toggleKey" type="button">显示</button>
+            </div>
+          </label>
+          <label class="check"><input type="checkbox" id="ephemeralKeys"> 🔒 公共/学校电脑保护：仅在当前标签页保留所有 API Key（关闭页面自动清除）</label>
+          <label class="field">
+            <span>模型列表 <small>(每行一个，也可在聊天顶栏随时手动输入)</small></span>
+            <textarea class="input mono" id="pf_models" rows="5" spellcheck="false" placeholder="gpt-4o&#10;deepseek-chat"></textarea>
+          </label>
+          <div class="row-btns">
+            <button class="btn sm" id="pf_fetchModels" type="button"><span data-icon="refresh"></span>从 API 拉取模型</button>
+            <button class="btn sm" id="pf_test" type="button"><span data-icon="check"></span>测试连接</button>
+            <span class="status" id="pf_status"></span>
+          </div>
+          <label class="check" id="pf_useProxyWrap"><input type="checkbox" id="pf_useProxy"> 通过本地服务器代理请求（解决浏览器跨域 CORS 限制，推荐开启）</label>
+          <p class="hint" id="pf_staticHint" hidden>🌐 当前为纯静态网页模式（如 GitHub Pages）：浏览器将直接加密请求目标 API（主流平台与绝大多数中转站均支持跨域直连）。如遇个别不支持 CORS 的接口，可在下方高级选项填入自定义代理。</p>
+          <label class="check" id="pf_streamUsageWrap"><input type="checkbox" id="pf_streamUsage"> 流式请求时附带 <code>stream_options</code> 以获取真实 Token 用量（若中转站报错请关闭）</label>
+          <details class="adv-details">
+            <summary>高级选项：自定义请求头 / 自定义 CORS 代理</summary>
+            <label class="field" style="margin-top:.5em">
+              <span>自定义 CORS 代理地址 <small>(可选，留空为直连；支持前缀 <code>https://proxy.example/?url=</code> 或 <code>{url}</code> 模板)</small></span>
+              <input class="input mono" id="pf_proxyUrl" placeholder="留空即可直连" spellcheck="false">
+            </label>
+            <label class="field">
+              <span>自定义请求头 <small>(支持每行 <code>Header: Value</code> 或 JSON 对象)</small></span>
+              <textarea class="input mono" id="pf_customHeaders" rows="3" spellcheck="false" placeholder="X-Custom-Header: value"></textarea>
+            </label>
+          </details>
+          <div class="danger-zone">
+            <button class="btn sm danger" id="pf_delete" type="button"><span data-icon="trash"></span>删除此提供商</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="hint">🔒 API Key 仅保存在本机浏览器 localStorage 中，请求直接（或经由本机 127.0.0.1 代理）发往你配置的服务端。</p>
+  </div>
+
+  <div class="dlg-body" data-panel="general" hidden>
+    <label class="field"><span>主题外观</span>
+      <select class="input" id="set_theme">
+        <option value="system">跟随系统</option>
+        <option value="light">浅色模式</option>
+        <option value="dark">深色模式</option>
+      </select>
+    </label>
+    <label class="field"><span>发送快捷键</span>
+      <select class="input" id="set_sendKey">
+        <option value="enter">Enter 发送，Shift+Enter 换行</option>
+        <option value="ctrlEnter">Ctrl/⌘+Enter 发送，Enter 换行</option>
+      </select>
+    </label>
+    <label class="field"><span>正文字号 <small id="fontSizeVal"></small></span>
+      <input type="range" id="set_fontSize" min="12" max="20" step="1">
+    </label>
+  </div>
+
+  <div class="dlg-body" data-panel="data" hidden>
+    <div class="card">
+      <h3>备份与迁移</h3>
+      <label class="check"><input type="checkbox" id="exportKeys"> 导出备份时包含 API Key（请注意保管导出的文件）</label>
+      <div class="row-btns">
+        <button class="btn sm" id="btnExportAll" type="button"><span data-icon="download"></span>导出全部数据 (JSON)</button>
+        <button class="btn sm" id="btnImport" type="button">导入备份数据</button>
+        <input type="file" id="importFile" accept=".json,application/json" hidden>
+      </div>
+    </div>
+    <div class="card">
+      <h3>危险与隐私操作</h3>
+      <div class="row-btns">
+        <button class="btn sm danger" id="btnWipeKeys" type="button">🔒 清除本机保存的所有 API Key</button>
+        <button class="btn sm danger" id="btnClearAll" type="button"><span data-icon="trash"></span>清空所有本地对话</button>
+      </div>
+    </div>
+  </div>
+</dialog>
+
+<!-- 提示词库 -->
+<dialog class="dlg dlg-wide" id="dlgPrompts" aria-labelledby="dlgPromptsTitle" closedby="any">
+  <div class="dlg-head">
+    <h2 id="dlgPromptsTitle">提示词库</h2>
+    <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
+  </div>
+  <div class="dlg-body">
+    <div class="prov-layout">
+      <div class="prov-side">
+        <div class="prov-list" id="promptList"></div>
+        <button class="btn sm block" id="pr_new" type="button"><span data-icon="plus"></span>新建提示词</button>
+      </div>
+      <div class="prov-form">
+        <label class="field"><span>模板名称</span><input class="input" id="pr_name"></label>
+        <label class="field"><span>提示词内容 <small class="dim" id="pr_tokens"></small></span><textarea class="input" id="pr_content" rows="11"></textarea></label>
+        <div class="row-btns">
+          <button class="btn sm primary" id="pr_apply" type="button">应用到当前对话</button>
+          <button class="btn sm" id="pr_default" type="button">设为新对话默认</button>
+          <button class="btn sm" id="pr_clearDefault" type="button">取消默认</button>
+          <button class="btn sm danger" id="pr_delete" type="button"><span data-icon="trash"></span>删除</button>
+        </div>
+        <p class="hint" id="pr_defaultHint"></p>
+      </div>
+    </div>
+  </div>
+</dialog>
+
+<!-- 图片灯箱预览 -->
+<dialog class="dlg-img" id="dlgImage" aria-label="图片预览" closedby="any">
+  <img id="dlgImageTag" alt="图片预览">
+  <form method="dialog"><button class="icon-btn dlg-img-close" aria-label="关闭预览"><span data-icon="x"></span></button></form>
+</dialog>
+
+<div class="toast" id="toast" popover="manual"></div>
+</body>
+</html>
