@@ -46,6 +46,13 @@ function toast(msg, ms = 2200) {
   }, ms);
 }
 
+function showModal(dlg) {
+  if (!dlg.open) dlg.showModal();
+  try {
+    if (els.toast.matches(':popover-open')) { els.toast.hidePopover(); els.toast.showPopover(); }
+  } catch {}
+}
+
 function relTime(ts) {
   const d = (Date.now() - ts) / 1000;
   if (d < 60) return '刚刚';
@@ -68,8 +75,21 @@ function expandPrompt(raw, model = '') {
 }
 
 async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); toast('已复制'); }
-  catch { toast('复制失败，请手动选择复制'); }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('已复制');
+    return;
+  } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    toast(ok ? '已复制' : '复制失败，请手动选择复制');
+  } catch { toast('复制失败，请手动选择复制'); }
 }
 
 function download(name, content, type = 'application/json') {
@@ -83,6 +103,14 @@ function download(name, content, type = 'application/json') {
 // ======================= 状态与持久化 =======================
 const SKEY = 'nexus.settings';
 const KKEY = 'nexus.sessionKeys';
+const sGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const sSet = (k, v) => {
+  try { localStorage.setItem(k, v); }
+  catch (e) { if (e?.name === 'QuotaExceededError') toast('本地存储空间已满'); }
+};
+const ssGet = (k) => { try { return sessionStorage.getItem(k); } catch { return null; } };
+const ssSet = (k, v) => { try { sessionStorage.setItem(k, v); } catch {} };
+const ssDel = (k) => { try { sessionStorage.removeItem(k); } catch {} };
 const DEFAULT_PARAMS = {
   temperature: 0.7, top_p: 1, max_tokens: 4096, presence_penalty: 0, frequency_penalty: 0,
   enabled: { temperature: true, top_p: false, max_tokens: true, presence_penalty: false, frequency_penalty: false },
@@ -111,7 +139,7 @@ function mergeParams(p = {}) {
 
 function loadSettings() {
   let s = {};
-  try { s = JSON.parse(localStorage.getItem(SKEY) || '{}'); } catch {}
+  try { s = JSON.parse(sGet(SKEY) || '{}'); } catch {}
   const out = {
     providers: [], lastTarget: null, defaultSystemPrompt: '', modelMeta: {},
     theme: 'system', sendKey: 'enter', fontSize: 15, ephemeralKeys: false,
@@ -121,7 +149,7 @@ function loadSettings() {
   };
   if (out.ephemeralKeys) {
     try {
-      const kmap = JSON.parse(sessionStorage.getItem(KKEY) || '{}');
+      const kmap = JSON.parse(ssGet(KKEY) || '{}');
       for (const p of out.providers) if (kmap[p.id]) p.apiKey = kmap[p.id];
     } catch {}
   }
@@ -142,19 +170,17 @@ const state = {
 };
 
 function saveSettings() {
-  try {
-    if (state.settings.ephemeralKeys) {
-      const kmap = {};
-      for (const p of state.settings.providers) if (p.apiKey) kmap[p.id] = p.apiKey;
-      sessionStorage.setItem(KKEY, JSON.stringify(kmap));
-      const stripped = clone(state.settings);
-      for (const p of stripped.providers) p.apiKey = '';
-      localStorage.setItem(SKEY, JSON.stringify(stripped));
-    } else {
-      sessionStorage.removeItem(KKEY);
-      localStorage.setItem(SKEY, JSON.stringify(state.settings));
-    }
-  } catch (e) { toast('设置保存失败: ' + e.message); }
+  if (state.settings.ephemeralKeys) {
+    const kmap = {};
+    for (const p of state.settings.providers) if (p.apiKey) kmap[p.id] = p.apiKey;
+    ssSet(KKEY, JSON.stringify(kmap));
+    const stripped = clone(state.settings);
+    for (const p of stripped.providers) p.apiKey = '';
+    sSet(SKEY, JSON.stringify(stripped));
+  } else {
+    ssDel(KKEY);
+    sSet(SKEY, JSON.stringify(state.settings));
+  }
 }
 
 const saveTimers = new Map();
@@ -181,7 +207,11 @@ function contextFor(model) {
 function defaultTarget() {
   const ps = state.settings.providers;
   const lt = state.settings.lastTarget;
-  if (lt && getProvider(lt.providerId)) return lt;
+  const lp = lt && getProvider(lt.providerId);
+  if (lp) {
+    const model = (lt.model && (!lp.models?.length || lp.models.includes(lt.model))) ? lt.model : (lp.models?.[0] ?? lt.model ?? '');
+    if (model || !ps.some((x) => x.models?.length)) return { providerId: lp.id, model };
+  }
   const p = ps.find((x) => x.models?.length) ?? ps[0];
   return p ? { providerId: p.id, model: p.models?.[0] ?? '' } : { providerId: null, model: '' };
 }
@@ -197,7 +227,14 @@ function makeConv() {
 }
 
 function ensureTarget(conv) {
-  if (conv.providerId && getProvider(conv.providerId)) return;
+  const p = conv.providerId && getProvider(conv.providerId);
+  if (p) {
+    if (p.models?.length && (!conv.model || (!conv.messages.length && !p.models.includes(conv.model)))) {
+      conv.model = p.models[0];
+      conv.params.contextWindow = contextFor(conv.model);
+    }
+    return;
+  }
   const t = defaultTarget();
   conv.providerId = t.providerId;
   conv.model = t.model;
@@ -206,10 +243,13 @@ function ensureTarget(conv) {
 
 function newChat() {
   if (state.generating) stopGeneration();
-  const cur = currentConv();
-  if (!(cur === state.draft && cur && !cur.messages.length)) state.draft = makeConv();
+  state.draft = makeConv();
   state.currentId = state.draft.id;
+  state.editingMsgId = null;
+  state.stick = true;
   state.attachments = [];
+  els.input.value = '';
+  autosize();
   renderAll();
   els.input.focus();
   if (isMobile()) closeMobile();
@@ -255,15 +295,23 @@ function openPanelTo(cardId, focusEl) {
 // ======================= 上下文计算 =======================
 function computeContext(conv, draftText = '', draftImages = 0) {
   const p = conv.params;
+  const limit = Math.max(512, Number(p.contextWindow) || 128000);
   const resolvedSys = expandPrompt(conv.systemPrompt, conv.model);
   const sys = resolvedSys.trim() ? estimateTokens(resolvedSys) + 4 : 0;
   const reserve = p.enabled.max_tokens ? p.max_tokens : 0;
   const input = draftText || draftImages ? estimateTokens(draftText) + 4 + draftImages * IMAGE_TOKENS : 0;
-  const budget = p.contextWindow - reserve - sys - input;
+  const budget = limit - reserve - sys - input;
   const allNonErr = conv.messages.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
   const manualExcluded = allNonErr.filter((m) => m.excluded).length;
   const valid = allNonErr.filter((m) => !m.excluded);
-  let included = p.maxHistory > 0 ? valid.slice(-p.maxHistory) : valid.slice();
+  let included;
+  if (p.maxHistory > 0) {
+    if (!draftText && !draftImages && valid.at(-1)?.role === 'user') {
+      included = [...valid.slice(0, -1).slice(-p.maxHistory), valid.at(-1)];
+    } else {
+      included = valid.slice(-p.maxHistory);
+    }
+  } else included = valid.slice();
   let history = included.reduce((s, m) => s + messageTokens(m), 0);
   const limitedByCount = valid.length - included.length;
   let trimmedByWindow = 0;
@@ -275,7 +323,7 @@ function computeContext(conv, draftText = '', draftImages = 0) {
   }
   const used = sys + history + input;
   return {
-    sys, history, input, reserve, used, total: used + reserve, limit: p.contextWindow,
+    sys, history, input, reserve, used, total: used + reserve, limit,
     includedIds: new Set(included.map((m) => m.id)), included,
     limitedByCount, trimmedByWindow, manualExcluded, totalMsgs: allNonErr.length,
   };
@@ -388,10 +436,11 @@ function onModelChange() {
 function splitThink(m) {
   let content = m.content || '';
   let reasoning = m.reasoning || '';
-  if (!reasoning && content.startsWith('<think>')) {
-    const end = content.indexOf('</think>');
-    if (end < 0) { reasoning = content.slice(7); content = ''; }
-    else { reasoning = content.slice(7, end); content = content.slice(end + 8).trimStart(); }
+  const trimmed = content.trimStart();
+  if (!reasoning && trimmed.startsWith('<think>')) {
+    const end = trimmed.indexOf('</think>');
+    if (end < 0) { reasoning = trimmed.slice(7).trimStart(); content = ''; }
+    else { reasoning = trimmed.slice(7, end).trim(); content = trimmed.slice(end + 8).trimStart(); }
   }
   return { content, reasoning };
 }
@@ -513,10 +562,12 @@ function fillContent(el, m) {
     c.append(g);
   }
   if (m.role === 'user') {
-    const t = document.createElement('div');
-    t.className = 'user-text';
-    t.textContent = m.content;
-    c.append(t);
+    if (m.content) {
+      const t = document.createElement('div');
+      t.className = 'user-text';
+      t.textContent = m.content;
+      c.append(t);
+    }
     return;
   }
   const { content, reasoning } = splitThink(m);
@@ -720,7 +771,10 @@ async function downscale(dataUrl, max = 2048) {
   const cv = document.createElement('canvas');
   cv.width = Math.round(img.naturalWidth * scale);
   cv.height = Math.round(img.naturalHeight * scale);
-  cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+  const ctx2d = cv.getContext('2d');
+  ctx2d.fillStyle = '#ffffff';
+  ctx2d.fillRect(0, 0, cv.width, cv.height);
+  ctx2d.drawImage(img, 0, 0, cv.width, cv.height);
   return cv.toDataURL('image/jpeg', 0.9);
 }
 
@@ -771,7 +825,7 @@ async function send() {
   const images = state.attachments.filter((a) => a.kind === 'image').map((a) => a.data);
   if (!content && !images.length) return;
   ensureTarget(conv);
-  if (!conv.providerId || !getProvider(conv.providerId)) { toast('请先添加 API 提供商'); openSettings('providers'); return; }
+  if (!conv.providerId || !getProvider(conv.providerId)) { openSettings('providers'); toast('请先添加 API 提供商'); return; }
   if (!conv.model) { toast('请先选择或输入模型名称'); els.selModel.focus(); return; }
 
   conv.messages.push({ id: uid(), role: 'user', content, images, time: Date.now() });
@@ -869,7 +923,14 @@ async function onMessageAction(act, msgEl) {
     case 'regen': {
       if (state.generating) return;
       conv.messages.splice(idx);
-      if (!conv.messages.some((x) => x.role === 'user' && !x.excluded)) { renderMessages(); return; }
+      if (!conv.messages.some((x) => x.role === 'user' && !x.excluded)) {
+        saveConvSoon(conv, 0);
+        renderMessages();
+        updateMeter();
+        renderConvList();
+        return;
+      }
+      await saveConvNow(conv);
       await generate(conv);
       break;
     }
@@ -883,7 +944,11 @@ async function onMessageAction(act, msgEl) {
       break;
     case 'edit-save':
     case 'edit-send': {
-      m.content = msgEl.querySelector('.edit-box textarea').value;
+      const val = msgEl.querySelector('.edit-box textarea').value;
+      if (!val.trim() && !m.images?.length) { toast('消息内容不能为空'); return; }
+      m.content = val;
+      delete m.error;
+      delete m.stopped;
       state.editingMsgId = null;
       if (act === 'edit-send') {
         m.excluded = false;
@@ -908,21 +973,29 @@ function exportChatMarkdown() {
   if (conv.systemPrompt?.trim()) md += `## 系统提示词\n\n${conv.systemPrompt}\n\n---\n\n`;
   for (const m of conv.messages) {
     if (m.error) continue;
-    md += `### ${m.role === 'user' ? '🧑 用户' : `🤖 ${m.model || 'AI'}`}\n\n${m.content}\n\n`;
+    const body = [m.images?.length ? `*[包含 ${m.images.length} 张图片]*` : '', m.content].filter(Boolean).join('\n\n');
+    md += `### ${m.role === 'user' ? '🧑 用户' : `🤖 ${m.model || 'AI'}`}\n\n${body}\n\n`;
   }
-  download(`${conv.title.replace(/[\\/:*?"<>|]/g, '_')}.md`, md, 'text/markdown');
+  const safeName = conv.title.replace(/[\\/:*?"<>|]/g, '_').trim() || 'chat';
+  download(`${safeName}.md`, md, 'text/markdown');
 }
 
 // ======================= 设置对话框 =======================
+function maskKeyInput() {
+  els.pf_apiKey.type = 'password';
+  els.pf_toggleKey.textContent = '显示';
+}
+
 function openSettings(tab = 'providers') {
   switchTab(tab);
   if (!state.editingProviderId || !getProvider(state.editingProviderId)) state.editingProviderId = state.settings.providers[0]?.id ?? null;
+  maskKeyInput();
   renderProviders();
   els.set_theme.value = state.settings.theme;
   els.set_sendKey.value = state.settings.sendKey;
   els.set_fontSize.value = state.settings.fontSize;
   els.fontSizeVal.textContent = `${state.settings.fontSize}px`;
-  if (!els.dlgSettings.open) els.dlgSettings.showModal();
+  showModal(els.dlgSettings);
 }
 
 function switchTab(tab) {
@@ -980,6 +1053,7 @@ function addProviderFromPreset(idx) {
   };
   state.settings.providers.push(p);
   state.editingProviderId = p.id;
+  maskKeyInput();
   saveSettings();
   renderProviders();
   onProvidersChanged();
@@ -989,11 +1063,14 @@ function addProviderFromPreset(idx) {
 function onProvidersChanged() {
   const conv = currentConv();
   if (conv) {
-    const before = conv.providerId;
+    const beforeProv = conv.providerId;
+    const beforeModel = conv.model;
     ensureTarget(conv);
-    if (before !== conv.providerId) saveConvSoon(conv);
+    if (beforeProv !== conv.providerId || beforeModel !== conv.model) saveConvSoon(conv);
   }
-  renderModelSelect();
+  renderHeader();
+  renderPanel();
+  updateMeter();
   if (!conv?.messages.length) renderMessages();
 }
 
@@ -1021,23 +1098,26 @@ async function testProvider() {
   const p = getProvider(state.editingProviderId);
   if (!p) return;
   setStatus('正在测试…');
-  try {
-    const models = await listModels(p);
-    setStatus(`✓ 连接成功（${models.length} 个可用模型）`, 'ok');
-    return;
-  } catch (e1) {
-    const model = p.models?.[0];
-    if (!model) { setStatus('✗ ' + e1.message, 'err'); return; }
+  const model = p.models?.[0];
+  if (model) {
     try {
       let got = '';
       await sendChat({
         provider: p, model, system: '', messages: [{ role: 'user', content: 'Hi' }],
-        params: { ...mergeParams(), max_tokens: 16, stream: false, enabled: { max_tokens: true } },
-        onDelta: ({ content }) => { got += content || ''; },
+        params: { ...mergeParams(), max_tokens: 32, stream: false, enabled: { max_tokens: true } },
+        onDelta: ({ content, reasoning }) => { got += content || reasoning || ''; },
       });
-      setStatus(`✓ 对话测试成功（${model}）${got ? '：' + got.slice(0, 30) : ''}`, 'ok');
-    } catch (e2) { setStatus('✗ ' + e2.message, 'err'); }
+      setStatus(`✓ 对话测试成功（${model}）${got ? '：' + got.trim().slice(0, 30) : ''}`, 'ok');
+      return;
+    } catch (e) {
+      setStatus('✗ ' + e.message, 'err');
+      return;
+    }
   }
+  try {
+    const models = await listModels(p);
+    setStatus(`✓ 接口可达（发现 ${models.length} 个模型，请先拉取或填写模型名称）`, 'ok');
+  } catch (e) { setStatus('✗ ' + e.message, 'err'); }
 }
 
 // ======================= 提示词库 =======================
@@ -1045,7 +1125,7 @@ function openPrompts() {
   const ps = state.settings.prompts;
   if (!getPrompt(state.editingPromptId)) state.editingPromptId = ps[0]?.id ?? null;
   renderPrompts();
-  if (!els.dlgPrompts.open) els.dlgPrompts.showModal();
+  showModal(els.dlgPrompts);
 }
 const getPrompt = (id) => state.settings.prompts.find((p) => p.id === id);
 
@@ -1113,8 +1193,22 @@ async function importAll(file) {
       }
       for (const p of s.prompts || []) if (!getPrompt(p.id)) state.settings.prompts.push(p);
       Object.assign(state.settings.modelMeta, s.modelMeta || {});
+      if (typeof s.defaultSystemPrompt === 'string') state.settings.defaultSystemPrompt = s.defaultSystemPrompt;
+      if (s.defaultParams) state.settings.defaultParams = mergeParams(s.defaultParams);
+      if (s.theme) state.settings.theme = s.theme;
+      if (s.sendKey) state.settings.sendKey = s.sendKey;
+      if (s.fontSize) state.settings.fontSize = Number(s.fontSize) || 15;
+      els.set_theme.value = state.settings.theme;
+      els.set_sendKey.value = state.settings.sendKey;
+      els.set_fontSize.value = state.settings.fontSize;
+      els.fontSizeVal.textContent = `${state.settings.fontSize}px`;
+      applyTheme();
+      updatePlaceholder();
       saveSettings();
     }
+    if (currentConv() === state.draft && !state.draft.messages.length && state.convs.length) {
+      state.currentId = [...state.convs].sort((a, b) => b.updatedAt - a.updatedAt)[0].id;
+    } else if (currentConv()) ensureTarget(currentConv());
     toast(`已导入 ${added} 个对话`);
     renderAll();
     renderProviders();
@@ -1137,7 +1231,7 @@ function togglePanel() {
   if (isMobile()) { els.app.classList.remove('m-sidebar'); els.app.classList.toggle('m-panel'); }
   else {
     els.app.classList.toggle('panel-hidden');
-    localStorage.setItem('nexus.panelHidden', els.app.classList.contains('panel-hidden') ? '1' : '');
+    sSet('nexus.panelHidden', els.app.classList.contains('panel-hidden') ? '1' : '');
   }
 }
 
@@ -1189,7 +1283,7 @@ function bindEvents() {
       return;
     }
     const img = e.target.closest('.images img');
-    if (img) { els.dlgImageTag.src = img.src; els.dlgImage.showModal(); return; }
+    if (img) { els.dlgImageTag.src = img.src; showModal(els.dlgImage); return; }
     const a = e.target.closest('[data-act]');
     if (!a) return;
     const act = a.dataset.act;
@@ -1338,6 +1432,7 @@ function bindEvents() {
     const b = e.target.closest('.prov-item');
     if (!b) return;
     state.editingProviderId = b.dataset.id;
+    maskKeyInput();
     renderProviders();
   });
   els.presetSelect.append(...PRESETS.map((p, i) => { const o = document.createElement('option'); o.value = i; o.textContent = p.name; return o; }));
@@ -1364,8 +1459,8 @@ function bindEvents() {
   };
   els.pf_name.addEventListener('input', pf('name', () => els.pf_name.value));
   els.pf_type.addEventListener('change', pf('type', () => els.pf_type.value, true));
-  els.pf_baseUrl.addEventListener('input', pf('baseUrl', () => els.pf_baseUrl.value.trim()));
-  els.pf_apiKey.addEventListener('input', pf('apiKey', () => els.pf_apiKey.value.trim()));
+  els.pf_baseUrl.addEventListener('input', pf('baseUrl', () => els.pf_baseUrl.value.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()));
+  els.pf_apiKey.addEventListener('input', pf('apiKey', () => els.pf_apiKey.value.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()));
   els.ephemeralKeys.addEventListener('change', () => {
     state.settings.ephemeralKeys = els.ephemeralKeys.checked;
     saveSettings();
@@ -1411,7 +1506,7 @@ function bindEvents() {
   els.btnWipeKeys.addEventListener('click', () => {
     if (!confirm('确定清除本机保存的所有 API Key？（提供商配置与聊天记录会保留）')) return;
     state.settings.providers.forEach((p) => { p.apiKey = ''; });
-    sessionStorage.removeItem(KKEY);
+    ssDel(KKEY);
     saveSettings();
     renderProviders();
     toast('已清除本机所有 API Key');
@@ -1490,7 +1585,15 @@ function bindEvents() {
   });
 
   // 其他
-  addEventListener('storage', (e) => { if (e.key === SKEY) { state.settings = loadSettings(); applyTheme(); renderHeader(); } });
+  addEventListener('storage', (e) => {
+    if (e.key === SKEY) {
+      state.settings = loadSettings();
+      applyTheme();
+      renderHeader();
+      renderPanel();
+      if (!currentConv()?.messages.length) renderMessages();
+    }
+  });
   addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newChat(); }
     if (e.key === 'Escape' && state.generating && !document.querySelector('dialog[open]')) stopGeneration();
@@ -1520,7 +1623,7 @@ async function init() {
   buildParamList();
   bindEvents();
   updatePlaceholder();
-  if (localStorage.getItem('nexus.panelHidden')) els.app.classList.add('panel-hidden');
+  if (sGet('nexus.panelHidden')) els.app.classList.add('panel-hidden');
   try {
     state.convs = (await db.getAll()).map((c) => ({ ...c, params: mergeParams(c.params) }));
     // 修复异常中断时残留的 pending 状态

@@ -82,33 +82,48 @@ async function handleProxy(req, res) {
   }
 }
 
-function serveStatic(req, res) {
-  const reqPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
-  let filePath = path.normalize(path.join(PUBLIC_DIR, reqPath));
-  if (!filePath.startsWith(PUBLIC_DIR)) { res.writeHead(403); res.end('Forbidden'); return; }
-  if (reqPath.endsWith('/')) filePath = path.join(filePath, 'index.html');
+function serveStatic(reqPath, res) {
+  const relPath = reqPath.endsWith('/') ? reqPath + 'index.html' : reqPath;
+  const filePath = path.resolve(PUBLIC_DIR, '.' + relPath);
+  if (filePath !== PUBLIC_DIR && !filePath.startsWith(PUBLIC_DIR + path.sep)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
   fs.stat(filePath, (err, stat) => {
     if (err || !stat.isFile()) { res.writeHead(404); res.end('Not Found'); return; }
     res.writeHead(200, {
       'content-type': MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
       'cache-control': 'no-cache',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => { if (!res.headersSent) res.writeHead(500); res.end(); });
+    stream.pipe(res);
   });
 }
 
 http.createServer((req, res) => {
-  if (req.url === '/api/health') {
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  } catch {
+    res.writeHead(400);
+    res.end('Bad Request');
+    return;
+  }
+  if (pathname === '/api/health') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
     res.end('{"ok":true,"proxy":true}');
     return;
   }
-  if (req.url.startsWith('/api/proxy')) {
-    handleProxy(req, res).catch((e) => { try { res.writeHead(500); res.end(e.message); } catch {} });
+  if (pathname === '/api/proxy') {
+    handleProxy(req, res).catch((e) => {
+      try { if (!res.headersSent) res.writeHead(500); res.end(e.message); } catch {}
+    });
     return;
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); res.end(); return; }
-  serveStatic(req, res);
+  serveStatic(pathname, res);
 }).listen(PORT, HOST, () => {
   console.log(`\n  Nexus Chat 已启动 →  http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
 });

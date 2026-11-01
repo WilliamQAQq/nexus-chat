@@ -23,10 +23,15 @@ export const PRESETS = [
   { name: '自定义 (OpenAI 兼容 / 中转站)', type: 'openai', baseUrl: '', models: [] },
 ];
 
-const trimBase = (u) => (u || '').trim().replace(/\/+$/, '');
+const trimBase = (u) => (u || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\/+$/, '');
+const cleanKey = (k) => {
+  const s = (k || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (/[^\x20-\x7E]/.test(s)) throw new Error('API Key 包含非法字符（如中文或全角符号），请检查是否误粘贴了多余内容');
+  return s;
+};
 
 export function openaiBase(p) {
-  let raw = (p?.baseUrl || '').trim();
+  let raw = (p?.baseUrl || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
   if (!raw) return '';
   const noAutoV1 = raw.endsWith('#');
   if (noAutoV1) raw = raw.slice(0, -1);
@@ -46,7 +51,7 @@ export const geminiBase = (p) => trimBase(p?.baseUrl || 'https://generativelangu
 export function resolveEndpointPreview(p, model = '{model}') {
   if (!p) return '';
   if (p.type === 'anthropic') return `${anthropicBase(p)}/v1/messages`;
-  if (p.type === 'gemini') return `${geminiBase(p)}/v1beta/models/${model.replace(/^models\//, '') || '{model}'}:streamGenerateContent`;
+  if (p.type === 'gemini') return `${geminiBase(p)}/v1beta/models/${(model || '{model}').replace(/^models\//, '') || '{model}'}:streamGenerateContent`;
   const b = openaiBase(p);
   return b ? `${b}/chat/completions` : '（请填写 API 地址）';
 }
@@ -93,19 +98,22 @@ export async function detectLocalProxy() {
 
 export const hasLocalProxy = () => localProxyAvailable;
 
-function pfetch(provider, url, init = {}) {
+async function pfetch(provider, url, init = {}) {
   const headers = new Headers(init.headers);
   if (provider.customHeaders?.trim()) {
     const extra = parseCustomHeaders(provider.customHeaders);
-    for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+    for (const [k, v] of Object.entries(extra)) {
+      try { headers.set(k, v); }
+      catch { throw new Error(`自定义请求头包含非法字符：${k}`); }
+    }
   }
-  const customProxy = (provider.proxyUrl || '').trim();
+  const customProxy = trimBase(provider.proxyUrl);
   if (customProxy) {
     if (customProxy.includes('{url}')) {
       return fetch(customProxy.replace('{url}', encodeURIComponent(url)), { ...init, headers });
     }
-    if (customProxy.endsWith('=') || customProxy.endsWith('/')) {
-      return fetch(`${customProxy}${url}`, { ...init, headers });
+    if (customProxy.endsWith('=') || (provider.proxyUrl || '').trim().endsWith('/')) {
+      return fetch(`${(provider.proxyUrl || '').trim()}${url}`, { ...init, headers });
     }
     headers.set('x-target-url', url);
     return fetch(customProxy, { ...init, headers });
@@ -131,20 +139,26 @@ async function ensureOk(res) {
 }
 
 async function* sse(res) {
+  if (!res.body) return;
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = '';
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += value;
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).replace(/\r$/, '');
-      buf = buf.slice(idx + 1);
-      if (line.startsWith('data:')) yield line.slice(5).trimStart();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        if (line.startsWith('data:')) yield line.slice(5).trimStart();
+      }
     }
+    const tail = buf.trim();
+    if (tail.startsWith('data:')) yield tail.slice(5).trimStart();
+  } finally {
+    reader.cancel().catch(() => {});
   }
-  if (buf.startsWith('data:')) yield buf.slice(5).trim();
 }
 
 const parseJSON = (s) => { try { return JSON.parse(s); } catch { return null; } };
@@ -203,7 +217,8 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
   if (params.stream && provider.streamUsage !== false) body.stream_options = { include_usage: true };
 
   const headers = { 'Content-Type': 'application/json' };
-  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+  const key = cleanKey(provider.apiKey);
+  if (key) headers.Authorization = `Bearer ${key}`;
   const res = await pfetch(provider, `${base}/chat/completions`, {
     method: 'POST', headers, body: JSON.stringify(body), signal,
   });
@@ -235,7 +250,7 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
 function anthropicHeaders(provider) {
   return {
     'Content-Type': 'application/json',
-    'x-api-key': provider.apiKey || '',
+    'x-api-key': cleanKey(provider.apiKey),
     'anthropic-version': '2023-06-01',
     'anthropic-dangerous-direct-browser-access': 'true',
   };
@@ -323,11 +338,12 @@ async function chatGemini({ provider, model, system, messages, params, signal, o
   };
   if (system?.trim()) body.systemInstruction = { parts: [{ text: system }] };
 
-  const name = model.replace(/^models\//, '');
+  const name = (model || '').replace(/^models\//, '').trim();
+  if (!name) throw new Error('请先选择或输入模型名称');
   const action = params.stream ? 'streamGenerateContent?alt=sse' : 'generateContent';
   const res = await pfetch(provider, `${geminiBase(provider)}/v1beta/models/${encodeURIComponent(name)}:${action}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': provider.apiKey || '' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': cleanKey(provider.apiKey) },
     body: JSON.stringify(body),
     signal,
   });
@@ -336,7 +352,7 @@ async function chatGemini({ provider, model, system, messages, params, signal, o
   let usage = null;
   let finish = null;
   const handle = (j) => {
-    if (j.error) throw new Error(j.error.message);
+    if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
     if (j.promptFeedback?.blockReason) throw new Error(`请求被拦截: ${j.promptFeedback.blockReason}`);
     const cand = j.candidates?.[0];
     for (const p of cand?.content?.parts || []) {
@@ -353,7 +369,7 @@ async function chatGemini({ provider, model, system, messages, params, signal, o
   return { usage, finish };
 }
 
-export function sendChat(opts) {
+export async function sendChat(opts) {
   const impl = { openai: chatOpenAI, anthropic: chatAnthropic, gemini: chatGemini }[opts.provider.type];
   if (!impl) throw new Error(`未知的协议类型: ${opts.provider.type}`);
   return impl(opts);
@@ -367,7 +383,7 @@ export async function listModels(provider) {
     return ((await res.json()).data || []).map((m) => m.id);
   }
   if (provider.type === 'gemini') {
-    res = await pfetch(provider, `${geminiBase(provider)}/v1beta/models?pageSize=1000`, { headers: { 'x-goog-api-key': provider.apiKey || '' } });
+    res = await pfetch(provider, `${geminiBase(provider)}/v1beta/models?pageSize=1000`, { headers: { 'x-goog-api-key': cleanKey(provider.apiKey) } });
     await ensureOk(res);
     return ((await res.json()).models || [])
       .filter((m) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
@@ -375,7 +391,8 @@ export async function listModels(provider) {
   }
   const base = openaiBase(provider);
   if (!base) throw new Error('请先填写 API 地址 (Base URL)');
-  const headers = provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {};
+  const key = cleanKey(provider.apiKey);
+  const headers = key ? { Authorization: `Bearer ${key}` } : {};
   res = await pfetch(provider, `${base}/models`, { headers });
   await ensureOk(res);
   const j = await res.json();

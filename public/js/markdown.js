@@ -8,7 +8,7 @@ function styleText(s) {
   return s
     .replace(/\*\*\*([^*\n]+)\*\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/__([^_\n]+?)__/g, '<strong>$1</strong>')
+    .replace(/(^|[^\w])__([^_\n]+?)__(?![_\w])/g, '$1<strong>$2</strong>')
     .replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>')
     .replace(/~~([^~\n]+?)~~/g, '<del>$1</del>');
 }
@@ -17,14 +17,17 @@ function inline(text) {
   const tokens = [];
   const hold = (html) => { tokens.push(html); return `${PH}${tokens.length - 1}${PH}`; };
 
-  // 1. 保护行内代码（移除源码中可能出现的私有区字符）
-  let s = String(text).replaceAll(PH, '').replace(/`([^`\n]+)`/g, (_, c) => hold(`<code>${esc(c)}</code>`));
+  // 1. 保护行内代码（支持单/多反引号，并移除源码中可能出现的私有区字符）
+  let s = String(text).replaceAll(PH, '').replace(/(`+)(?!`)(.*?[^`\n])\1(?!`)/g, (_, ticks, c) => {
+    const code = c.length >= 2 && c.startsWith(' ') && c.endsWith(' ') && c.trim() ? c.slice(1, -1) : c;
+    return hold(`<code>${esc(code)}</code>`);
+  });
   // 2. 转义其余所有文本
   s = esc(s);
-  // 3. 图片与显式链接（仅允许 http/https，放入占位符避免被裸链接二次匹配）
-  s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,
+  // 3. 图片与显式链接（仅允许 http/https，支持 URL 中一层配对括号，放入占位符避免被裸链接二次匹配）
+  s = s.replace(/!\[([^\]]*)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g,
     (_, alt, u) => hold(`<img src="${u}" alt="${alt}" loading="lazy">`));
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g,
     (_, t, u) => hold(`<a href="${u}" target="_blank" rel="noopener noreferrer">${styleText(t)}</a>`));
   // 4. 裸 URL 自动转链接
   s = s.replace(/(^|[\s(（])(https?:\/\/[^\s<>()（）\uE000]+[^\s<>()（）\uE000.,;:!?。，；：！？])/g,
@@ -44,13 +47,38 @@ function codeBlock(code, lang) {
 }
 
 const LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
-const FENCE_RE = /^\s*(```|~~~)\s*([\w+#.-]*)/;
+const FENCE_RE = /^\s*(`{3,}|~{3,})\s*([^\s`~]*)/;
 const HR_RE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const HEAD_RE = /^(#{1,6})\s+(.*)$/;
 const TABLE_SEP_RE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
 function splitRow(line) {
-  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  const cells = [];
+  let cur = '';
+  let ticks = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\' && s[i + 1] === '|') { cur += '|'; i++; continue; }
+    if (ch === '`') {
+      let run = 1;
+      while (s[i + run] === '`') run++;
+      if (ticks === 0) {
+        // 仅当同一行后续存在同长度反引号闭合时才进入保护态
+        const closeRe = new RegExp(`(?<!\`)\`{${run}}(?!\`)`);
+        if (closeRe.test(s.slice(i + run))) ticks = run;
+      } else if (run === ticks) ticks = 0;
+      cur += s.slice(i, i + run);
+      i += run - 1;
+      continue;
+    }
+    if (ch === '|' && ticks === 0) { cells.push(cur.trim()); cur = ''; continue; }
+    cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
 }
 
 function isTableStart(lines, i) {
@@ -76,7 +104,7 @@ function parseList(lines, i, baseIndent) {
     let task = '';
     const tm = content.match(/^\[([ xX])\]\s+/);
     if (tm) { task = `<input type="checkbox" disabled${tm[1] !== ' ' ? ' checked' : ''}> `; content = content.slice(tm[0].length); }
-    let inner = task + inline(content).replace(/\n/g, '<br>');
+    let inner = task + content.split('\n').map(inline).join('<br>');
     let j = i;
     while (j < lines.length && !lines[j].trim()) j++;
     if (j < lines.length && LIST_RE.test(lines[j])) i = j;
@@ -106,9 +134,10 @@ export function renderMarkdown(src) {
     let m;
     if ((m = line.match(FENCE_RE))) {
       const fence = m[1];
+      const closeRe = new RegExp(`^\\s*${fence[0]}{${fence.length},}\\s*$`);
       const buf = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith(fence)) buf.push(lines[i++]);
+      while (i < lines.length && !closeRe.test(lines[i])) buf.push(lines[i++]);
       i++;
       html += codeBlock(buf.join('\n'), m[2]);
       continue;
