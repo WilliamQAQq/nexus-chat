@@ -1038,7 +1038,7 @@ async function onMessageAction(act, msgEl) {
       conv.messages.splice(idx);
       if (conv.compaction?.upToMsgId) {
         const upIdx = conv.messages.findIndex((x) => x.id === conv.compaction.upToMsgId);
-        if (upIdx < 0 || upIdx >= conv.messages.length - 1) conv.compaction = null;
+        if (upIdx < 0) conv.compaction = null;
       }
       const { active } = getCompactionSplit(conv);
       if (!active.some((x) => x.role === 'user' && !x.excluded)) {
@@ -1074,7 +1074,7 @@ async function onMessageAction(act, msgEl) {
         conv.messages.splice(idx + 1);
         if (conv.compaction?.upToMsgId) {
           const upIdx = conv.messages.findIndex((x) => x.id === conv.compaction.upToMsgId);
-          if (upIdx < 0 || upIdx >= conv.messages.length - 1) conv.compaction = null;
+          if (upIdx < 0) conv.compaction = null;
         }
         state.stick = true;
         await saveConvNow(conv);
@@ -1101,7 +1101,12 @@ function exportChatMarkdown() {
   if (conv.compaction?.summary?.trim()) md += `## 📦 上下文压缩摘要\n\n${conv.compaction.summary.trim()}\n\n---\n\n`;
   for (const m of conv.messages) {
     if (m.error) continue;
-    const body = [m.images?.length ? `*[包含 ${m.images.length} 张图片]*` : '', m.content].filter(Boolean).join('\n\n');
+    const { content, reasoning } = splitThink(m);
+    let body = [m.images?.length ? `*[包含 ${m.images.length} 张图片]*` : '', content].filter(Boolean).join('\n\n');
+    if (m.role === 'assistant' && reasoning) {
+      const quoted = reasoning.split('\n').map((l) => `> ${l}`).join('\n');
+      body = `> 💭 **思考过程**：\n${quoted}\n\n` + body;
+    }
     md += `### ${m.role === 'user' ? '🧑 用户' : `🤖 ${m.model || 'AI'}`}\n\n${body}\n\n`;
   }
   const safeName = conv.title.replace(/[\\/:*?"<>|]/g, '_').trim() || 'chat';
@@ -2241,7 +2246,13 @@ function bindEvents() {
     els.cp_keep.value = b.dataset.keep;
     updateCompactPreview();
   });
+  els.cp_focus.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); runCompactAI(); }
+  });
   els.cp_summary.addEventListener('input', updateCompactPreview);
+  els.cp_summary.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); applyCompaction(); }
+  });
   els.cp_generate.addEventListener('click', runCompactAI);
   els.cp_apply.addEventListener('click', applyCompaction);
   els.cp_revoke.addEventListener('click', revokeCompaction);
@@ -2257,6 +2268,13 @@ function bindEvents() {
     state.summaryEditing = !state.summaryEditing;
     renderSummaryTab();
     if (state.summaryEditing) els.sm_raw.focus();
+  });
+  els.sm_raw.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      state.summaryEditing = false;
+      renderSummaryTab();
+    }
   });
   els.sm_raw.addEventListener('input', () => {
     const conv = currentConv();

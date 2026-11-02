@@ -276,7 +276,7 @@ textarea.input { resize: vertical; line-height: 1.5; }
   border: 1px dashed var(--border); border-radius: var(--radius); padding: .5em .9em; margin-bottom: 18px;
   font-size: .85em; color: var(--text-dim); background: var(--bg-elev);
 }
-.sys-banner summary { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.sys-banner summary { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; list-style: none; }
 .sys-banner summary::-webkit-details-marker { display: none; }
 .sys-banner .sys-text { white-space: pre-wrap; margin-top: .5em; color: var(--text); }
 
@@ -294,6 +294,7 @@ textarea.input { resize: vertical; line-height: 1.5; }
 }
 .compact-banner > summary {
   cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+  list-style: none;
 }
 .compact-banner > summary::-webkit-details-marker { display: none; }
 .compact-banner .compact-title { font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
