@@ -6,11 +6,13 @@
   <meta name="color-scheme" content="light dark">
   <script>
     try {
-      const t = JSON.parse(localStorage.getItem('nexus.settings') || '{}').theme;
-      if (t === 'light' || t === 'dark') document.querySelector('meta[name="color-scheme"]').content = t;
+      const s = JSON.parse(localStorage.getItem('nexus.settings') || '{}');
+      if (s.theme === 'light' || s.theme === 'dark') document.querySelector('meta[name="color-scheme"]').content = s.theme;
+      const lang = s.language === 'en' || (s.language !== 'zh-CN' && !(navigator.language || '').toLowerCase().startsWith('zh')) ? 'en' : 'zh-CN';
+      document.documentElement.lang = lang;
     } catch {}
   </script>
-  <title>Nexus Chat · 自由接入任意 AI API</title>
+  <title>Nexus Chat · AI API Workspace</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%236366f1' d='M12 2 22 12 12 22 2 12z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
   <script type="module" src="js/app.js"></script>
@@ -21,31 +23,32 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-head">
       <div class="brand"><span class="logo">◆</span> Nexus Chat</div>
-      <button class="btn primary block" id="btnNewChat" type="button"><span data-icon="plus"></span>新对话</button>
-      <input class="input" id="searchConv" type="search" placeholder="搜索对话…" aria-label="搜索对话">
+      <button class="btn primary block" id="btnNewChat" type="button"><span data-icon="plus"></span><span data-i18n="newChat">新对话</span></button>
+      <input class="input" id="searchConv" type="search" placeholder="搜索对话…" data-i18n-placeholder="searchConv" aria-label="搜索对话" data-i18n-aria="searchConv">
     </div>
     <nav class="conv-list" id="convList" aria-label="对话列表"></nav>
     <div class="sidebar-foot">
-      <button class="btn ghost block" id="btnPrompts" type="button"><span data-icon="book"></span>提示词库</button>
-      <button class="btn ghost block" id="btnSettings" type="button"><span data-icon="gear"></span>设置与 API</button>
+      <button class="btn ghost block" id="btnPrompts" type="button"><span data-icon="book"></span><span data-i18n="promptLibrary">提示词库</span></button>
+      <button class="btn ghost block" id="btnSettings" type="button"><span data-icon="gear"></span><span data-i18n="settingsAndApi">设置与 API</span></button>
     </div>
   </aside>
 
   <!-- 中间：聊天 -->
   <main class="main">
     <header class="topbar">
-      <button class="icon-btn" id="btnToggleSidebar" type="button" aria-label="切换对话列表" title="对话列表"><span data-icon="menu"></span></button>
+      <button class="icon-btn" id="btnToggleSidebar" type="button" aria-label="切换对话列表" data-i18n-aria="toggleSidebar" title="对话列表" data-i18n-title="toggleSidebar"><span data-icon="menu"></span></button>
       <div class="title-wrap">
-        <button class="chat-title" id="chatTitle" type="button" title="点击重命名">新对话</button>
+        <button class="chat-title" id="chatTitle" type="button" title="点击重命名" data-i18n-title="clickToRename">新对话</button>
         <select class="model-select" id="selModel" aria-label="选择模型"></select>
       </div>
       <div class="top-pills">
-        <button class="pill-btn" id="topTempBtn" type="button" title="当前温度控制（点击调整）">🌡 0.7</button>
-        <button class="pill-btn" id="topCtxBtn" type="button" title="上下文窗口占用（点击查看明细）">📊 0%</button>
+        <button class="pill-btn" id="topTempBtn" type="button" title="当前温度控制（点击调整）" data-i18n-title="tempPillTitle">🌡 0.7</button>
+        <button class="pill-btn" id="topCtxBtn" type="button" title="上下文窗口占用（点击查看明细）" data-i18n-title="ctxPillTitle">📊 0%</button>
       </div>
-      <button class="icon-btn" id="btnCompact" type="button" aria-label="上下文压缩与总结" title="上下文压缩与对话总结"><span data-icon="compress"></span></button>
-      <button class="icon-btn" id="btnExportChat" type="button" aria-label="导出为 Markdown" title="导出为 Markdown"><span data-icon="download"></span></button>
-      <button class="icon-btn" id="btnTogglePanel" type="button" aria-label="切换参数面板" title="参数面板"><span data-icon="sliders"></span></button>
+      <button class="icon-btn" id="btnLang" type="button" aria-label="Switch Language / 切换语言" title="Switch Language / 切换语言" style="font-size:.82em;font-weight:700">EN</button>
+      <button class="icon-btn" id="btnCompact" type="button" aria-label="上下文压缩与总结" data-i18n-aria="compactBtnTitle" title="上下文压缩与对话总结" data-i18n-title="compactBtnTitle"><span data-icon="compress"></span></button>
+      <button class="icon-btn" id="btnExportChat" type="button" aria-label="导出为 Markdown" data-i18n-aria="exportMdTitle" title="导出为 Markdown" data-i18n-title="exportMdTitle"><span data-icon="download"></span></button>
+      <button class="icon-btn" id="btnTogglePanel" type="button" aria-label="切换参数面板" data-i18n-aria="togglePanel" title="参数面板" data-i18n-title="togglePanel"><span data-icon="sliders"></span></button>
     </header>
 
     <section class="messages" id="messages" aria-live="polite"></section>
@@ -55,9 +58,9 @@
         <div class="attach-list" id="attachList"></div>
         <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可粘贴/拖入图片或文件）" aria-label="消息输入"></textarea>
         <div class="composer-bar">
-          <button class="icon-btn" id="btnAttach" type="button" aria-label="添加附件" title="添加图片或文本文件"><span data-icon="clip"></span></button>
+          <button class="icon-btn" id="btnAttach" type="button" aria-label="添加附件" data-i18n-aria="attachBtnTitle" title="添加图片或文本文件" data-i18n-title="attachBtnTitle"><span data-icon="clip"></span></button>
           <input type="file" id="fileInput" multiple hidden>
-          <div class="meter" id="meter" title="点击查看上下文窗口额度明细">
+          <div class="meter" id="meter" title="点击查看上下文窗口额度明细" data-i18n-title="meterTitle">
             <div class="meter-bar" id="meterBar">
               <i class="seg sys"></i><i class="seg cmp"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i>
             </div>
@@ -73,19 +76,19 @@
   <!-- 右侧：参数面板 -->
   <aside class="panel" id="panel">
     <div class="panel-head">
-      <h2>对话控制面板</h2>
+      <h2 data-i18n="panelTitle">对话控制面板</h2>
       <button class="icon-btn" id="btnClosePanel" type="button" aria-label="关闭面板"><span data-icon="x"></span></button>
     </div>
     <div class="panel-body">
       <section class="card" id="cardCtx">
-        <h3>上下文窗口额度</h3>
+        <h3 data-i18n="cardCtxTitle">上下文窗口额度</h3>
         <div class="ctx-detail" id="ctxDetail"></div>
         <div class="row-btns" style="margin-bottom:.85em">
-          <button class="btn sm primary" id="btnOpenCompact" type="button"><span data-icon="compress"></span>压缩上下文</button>
-          <button class="btn sm" id="btnOpenSummary" type="button"><span data-icon="sparkle"></span>总结对话</button>
+          <button class="btn sm primary" id="btnOpenCompact" type="button"><span data-icon="compress"></span><span data-i18n="btnOpenCompact">压缩上下文</span></button>
+          <button class="btn sm" id="btnOpenSummary" type="button"><span data-icon="sparkle"></span><span data-i18n="btnOpenSummary">总结对话</span></button>
         </div>
         <label class="field">
-          <span>窗口大小 (tokens)</span>
+          <span data-i18n="ctxWindowLabel">窗口大小 (tokens)</span>
           <input class="input" id="ctxWindow" type="number" min="512" step="1">
         </label>
         <div class="chips" id="ctxChips">
@@ -97,42 +100,42 @@
           <button type="button" data-ctx="1048576">1M</button>
         </div>
         <label class="field">
-          <span>携带历史消息条数 <small>(0 = 不限)</small></span>
+          <span><span data-i18n="maxHistoryLabel">携带历史消息条数</span> <small data-i18n="maxHistorySub">(0 = 不限)</small></span>
           <input class="input" id="maxHistory" type="number" min="0" step="1">
         </label>
-        <label class="check"><input type="checkbox" id="autoTrim"> 超出窗口时自动截断最早的消息</label>
-        <label class="check"><input type="checkbox" id="autoCompact"> 占用超 80% 时发送前自动 AI 压缩早期历史</label>
+        <label class="check"><input type="checkbox" id="autoTrim"> <span data-i18n="autoTrimLabel">超出窗口时自动截断最早的消息</span></label>
+        <label class="check"><input type="checkbox" id="autoCompact"> <span data-i18n="autoCompactLabel">占用超 80% 时发送前自动 AI 压缩早期历史</span></label>
       </section>
 
       <section class="card" id="cardPrompt">
         <div class="card-title">
-          <h3>系统提示词 (System Prompt)</h3>
+          <h3 data-i18n="cardPromptTitle">系统提示词 (System Prompt)</h3>
           <span class="dim" id="sysTokens"></span>
         </div>
-        <textarea class="input sys-prompt" id="sysPrompt" rows="6" placeholder="例如：你是一位资深的软件工程师，回答简洁并给出示例代码。"></textarea>
-        <p class="hint">支持动态变量：<code>{{date}}</code>、<code>{{time}}</code>、<code>{{weekday}}</code>、<code>{{model}}</code></p>
+        <textarea class="input sys-prompt" id="sysPrompt" rows="6" placeholder="例如：你是一位资深的软件工程师，回答简洁并给出示例代码。" data-i18n-placeholder="sysPromptPlaceholder"></textarea>
+        <p class="hint" data-i18n-html="sysPromptVarHint">支持动态变量：<code>{{date}}</code>、<code>{{time}}</code>、<code>{{weekday}}</code>、<code>{{model}}</code></p>
         <div class="row-btns">
-          <button class="btn sm" id="btnOpenPrompts" type="button"><span data-icon="book"></span>提示词库</button>
-          <button class="btn sm" id="btnSavePrompt" type="button">存为模板</button>
-          <button class="btn sm" id="btnClearPrompt" type="button">清空</button>
+          <button class="btn sm" id="btnOpenPrompts" type="button"><span data-icon="book"></span><span data-i18n="promptLibrary">提示词库</span></button>
+          <button class="btn sm" id="btnSavePrompt" type="button" data-i18n="saveAsTemplate">存为模板</button>
+          <button class="btn sm" id="btnClearPrompt" type="button" data-i18n="clear">清空</button>
         </div>
       </section>
 
       <section class="card" id="cardParams">
-        <h3>温度与生成控制</h3>
+        <h3 data-i18n="cardParamsTitle">温度与生成控制</h3>
         <div class="chips" id="tempChips">
-          <button type="button" data-temp="0">严谨 0</button>
-          <button type="button" data-temp="0.2">代码 0.2</button>
-          <button type="button" data-temp="0.7">平衡 0.7</button>
-          <button type="button" data-temp="1.2">创意 1.2</button>
-          <button type="button" data-temp="off">不传温度</button>
+          <button type="button" data-temp="0" data-i18n="tempChip0">严谨 0</button>
+          <button type="button" data-temp="0.2" data-i18n="tempChip02">代码 0.2</button>
+          <button type="button" data-temp="0.7" data-i18n="tempChip07">平衡 0.7</button>
+          <button type="button" data-temp="1.2" data-i18n="tempChip12">创意 1.2</button>
+          <button type="button" data-temp="off" data-i18n="tempChipOff">不传温度</button>
         </div>
         <div id="paramList"></div>
-        <label class="check"><input type="checkbox" id="streamToggle"> 流式输出 (Stream)</label>
-        <p class="hint">取消勾选某个参数后将不会发送给 API（如 o1/o3/R1 等推理模型可关闭温度）。</p>
+        <label class="check"><input type="checkbox" id="streamToggle"> <span data-i18n="streamToggleLabel">流式输出 (Stream)</span></label>
+        <p class="hint" data-i18n="paramOmitHint">取消勾选某个参数后将不会发送给 API（如 o1/o3/R1 等推理模型可关闭温度）。</p>
         <div class="row-btns">
-          <button class="btn sm" id="btnSaveDefault" type="button">设为新对话默认</button>
-          <button class="btn sm" id="btnResetParams" type="button">恢复默认</button>
+          <button class="btn sm" id="btnSaveDefault" type="button" data-i18n="btnSaveDefault">设为新对话默认</button>
+          <button class="btn sm" id="btnResetParams" type="button" data-i18n="btnResetParams">恢复默认</button>
         </div>
       </section>
     </div>
@@ -143,11 +146,11 @@
 <!-- 设置对话框 -->
 <dialog class="dlg dlg-wide" id="dlgSettings" aria-labelledby="dlgSettingsTitle" closedby="any">
   <div class="dlg-head">
-    <h2 id="dlgSettingsTitle">设置</h2>
+    <h2 id="dlgSettingsTitle" data-i18n="settingsTitle">设置</h2>
     <div class="tabs" role="tablist">
-      <button type="button" role="tab" data-tab="providers" aria-selected="true">API 提供商</button>
-      <button type="button" role="tab" data-tab="general" aria-selected="false">通用</button>
-      <button type="button" role="tab" data-tab="data" aria-selected="false">数据</button>
+      <button type="button" role="tab" data-tab="providers" aria-selected="true" data-i18n="tabProviders">API 提供商</button>
+      <button type="button" role="tab" data-tab="general" aria-selected="false" data-i18n="tabGeneral">通用</button>
+      <button type="button" role="tab" data-tab="data" aria-selected="false" data-i18n="tabData">数据</button>
     </div>
     <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
   </div>
@@ -157,95 +160,102 @@
       <div class="prov-side">
         <div class="prov-list" id="providerList"></div>
         <select class="input" id="presetSelect" aria-label="添加提供商">
-          <option value="">＋ 添加提供商…</option>
+          <option value="" data-i18n="addProviderPrompt">＋ 添加提供商…</option>
         </select>
       </div>
       <div class="prov-form" id="providerForm">
-        <div class="empty-hint" id="providerEmpty">从左下角添加一个 API 提供商开始。<br>支持 OpenAI 兼容协议（绝大多数国内外平台、OneAPI/NewAPI 中转站、Ollama）、Anthropic 与 Gemini 原生协议。</div>
+        <div class="empty-hint" id="providerEmpty" data-i18n-html="welcomeNoApiDesc">从左下角添加一个 API 提供商开始。<br>支持 OpenAI 兼容协议（绝大多数国内外平台、OneAPI/NewAPI 中转站、Ollama）、Anthropic 与 Gemini 原生协议。</div>
         <div id="providerFields" hidden>
           <div class="grid2">
-            <label class="field"><span>名称</span><input class="input" id="pf_name"></label>
-            <label class="field"><span>协议类型</span><select class="input" id="pf_type"></select></label>
+            <label class="field"><span data-i18n="provNameLabel">名称</span><input class="input" id="pf_name"></label>
+            <label class="field"><span data-i18n="provTypeLabel">协议类型</span><select class="input" id="pf_type"></select></label>
           </div>
           <label class="field">
-            <span>API 地址 (Base URL) <small>（裸域名自动补 <code>/v1</code>，末尾加 <code>#</code> 可禁用自动补全）</small></span>
+            <span data-i18n="provBaseUrlLabel">API 地址 (Base URL)</span>
             <input class="input" id="pf_baseUrl" placeholder="https://api.example.com/v1" spellcheck="false">
             <small class="endpoint-preview" id="pf_endpoint"></small>
           </label>
           <label class="field">
-            <span>API Key</span>
+            <span data-i18n="provApiKeyLabel">API Key</span>
             <div class="input-group">
               <input class="input" id="pf_apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
               <button class="btn sm" id="pf_toggleKey" type="button">显示</button>
             </div>
           </label>
-          <label class="check"><input type="checkbox" id="ephemeralKeys"> 🔒 公共/学校电脑保护：仅在当前标签页保留所有 API Key（关闭页面自动清除）</label>
+          <label class="check"><input type="checkbox" id="ephemeralKeys"> <span data-i18n="ephemeralKeysLabel">🔒 公共/学校电脑保护：仅在当前标签页保留所有 API Key（关闭页面自动清除）</span></label>
           <label class="field">
-            <span>模型列表 <small>(每行一个，也可在聊天顶栏随时手动输入)</small></span>
+            <span data-i18n="provModelsLabel">模型列表 (每行一个)</span>
             <textarea class="input mono" id="pf_models" rows="5" spellcheck="false" placeholder="gpt-4o&#10;deepseek-chat"></textarea>
           </label>
           <div class="row-btns">
-            <button class="btn sm" id="pf_fetchModels" type="button"><span data-icon="refresh"></span>从 API 拉取模型</button>
-            <button class="btn sm" id="pf_test" type="button"><span data-icon="check"></span>测试连接</button>
+            <button class="btn sm" id="pf_fetchModels" type="button"><span data-icon="refresh"></span><span data-i18n="btnFetchModels">从 API 拉取模型</span></button>
+            <button class="btn sm" id="pf_test" type="button"><span data-icon="check"></span><span data-i18n="btnTestConn">测试连接</span></button>
             <span class="status" id="pf_status"></span>
           </div>
-          <label class="check" id="pf_useProxyWrap"><input type="checkbox" id="pf_useProxy"> 通过本地服务器代理请求（解决浏览器跨域 CORS 限制，推荐开启）</label>
+          <label class="check" id="pf_useProxyWrap"><input type="checkbox" id="pf_useProxy"> <span data-i18n="provUseProxyLabel">通过本地服务器代理请求（解决浏览器跨域 CORS 限制，推荐开启）</span></label>
           <p class="hint" id="pf_staticHint" hidden>🌐 当前为纯静态网页模式（如 GitHub Pages）：浏览器将直接加密请求目标 API（主流平台与绝大多数中转站均支持跨域直连）。如遇个别不支持 CORS 的接口，可在下方高级选项填入自定义代理。</p>
-          <label class="check" id="pf_streamUsageWrap"><input type="checkbox" id="pf_streamUsage"> 流式请求时附带 <code>stream_options</code> 以获取真实 Token 用量（若中转站报错请关闭）</label>
+          <label class="check" id="pf_streamUsageWrap"><input type="checkbox" id="pf_streamUsage"> <span data-i18n="provStreamUsageLabel">流式请求时附带 <code>stream_options</code> 以获取真实 Token 用量（若中转站报错请关闭）</span></label>
           <details class="adv-details">
-            <summary>高级选项：自定义请求头 / 自定义 CORS 代理</summary>
+            <summary data-i18n="advOptionsLabel">高级选项：自定义请求头 / 自定义 CORS 代理</summary>
             <label class="field" style="margin-top:.5em">
-              <span>自定义 CORS 代理地址 <small>(可选，留空为直连；支持前缀 <code>https://proxy.example/?url=</code> 或 <code>{url}</code> 模板)</small></span>
+              <span data-i18n="provProxyUrlLabel">自定义 CORS 代理地址</span>
               <input class="input mono" id="pf_proxyUrl" placeholder="留空即可直连" spellcheck="false">
             </label>
             <label class="field">
-              <span>自定义请求头 <small>(支持每行 <code>Header: Value</code> 或 JSON 对象)</small></span>
+              <span data-i18n="provHeadersLabel">自定义请求头</span>
               <textarea class="input mono" id="pf_customHeaders" rows="3" spellcheck="false" placeholder="X-Custom-Header: value"></textarea>
             </label>
           </details>
           <div class="danger-zone">
-            <button class="btn sm danger" id="pf_delete" type="button"><span data-icon="trash"></span>删除此提供商</button>
+            <button class="btn sm danger" id="pf_delete" type="button"><span data-icon="trash"></span><span data-i18n="btnDeleteProv">删除此提供商</span></button>
           </div>
         </div>
       </div>
     </div>
-    <p class="hint">🔒 API Key 仅保存在本机浏览器 localStorage 中，请求直接（或经由本机 127.0.0.1 代理）发往你配置的服务端。</p>
+    <p class="hint" data-i18n="keySafetyHint">🔒 API Key 仅保存在本机浏览器 localStorage 中，请求直接（或经由本机 127.0.0.1 代理）发往你配置的服务端。</p>
   </div>
 
   <div class="dlg-body" data-panel="general" hidden>
-    <label class="field"><span>主题外观</span>
+    <label class="field"><span data-i18n="setLanguageLabel">界面语言 / Language</span>
+      <select class="input" id="set_language">
+        <option value="auto">自动跟随系统 (Auto)</option>
+        <option value="zh-CN">简体中文 (Chinese)</option>
+        <option value="en">English</option>
+      </select>
+    </label>
+    <label class="field"><span data-i18n="setThemeLabel">主题外观</span>
       <select class="input" id="set_theme">
-        <option value="system">跟随系统</option>
-        <option value="light">浅色模式</option>
-        <option value="dark">深色模式</option>
+        <option value="system" data-i18n="themeSystem">跟随系统</option>
+        <option value="light" data-i18n="themeLight">浅色模式</option>
+        <option value="dark" data-i18n="themeDark">深色模式</option>
       </select>
     </label>
-    <label class="field"><span>发送快捷键</span>
+    <label class="field"><span data-i18n="setSendKeyLabel">发送快捷键</span>
       <select class="input" id="set_sendKey">
-        <option value="enter">Enter 发送，Shift+Enter 换行</option>
-        <option value="ctrlEnter">Ctrl/⌘+Enter 发送，Enter 换行</option>
+        <option value="enter" data-i18n="sendKeyEnterOpt">Enter 发送，Shift+Enter 换行</option>
+        <option value="ctrlEnter" data-i18n="sendKeyCtrlOpt">Ctrl/⌘+Enter 发送，Enter 换行</option>
       </select>
     </label>
-    <label class="field"><span>正文字号 <small id="fontSizeVal"></small></span>
+    <label class="field"><span><span data-i18n="setFontSizeLabel">正文字号</span> <small id="fontSizeVal"></small></span>
       <input type="range" id="set_fontSize" min="12" max="20" step="1">
     </label>
   </div>
 
   <div class="dlg-body" data-panel="data" hidden>
     <div class="card">
-      <h3>备份与迁移</h3>
-      <label class="check"><input type="checkbox" id="exportKeys"> 导出备份时包含 API Key（请注意保管导出的文件）</label>
+      <h3 data-i18n="dataBackupTitle">备份与迁移</h3>
+      <label class="check"><input type="checkbox" id="exportKeys"> <span data-i18n="exportKeysLabel">导出备份时包含 API Key（请注意保管导出的文件）</span></label>
       <div class="row-btns">
-        <button class="btn sm" id="btnExportAll" type="button"><span data-icon="download"></span>导出全部数据 (JSON)</button>
-        <button class="btn sm" id="btnImport" type="button">导入备份数据</button>
+        <button class="btn sm" id="btnExportAll" type="button"><span data-icon="download"></span><span data-i18n="btnExportAll">导出全部数据 (JSON)</span></button>
+        <button class="btn sm" id="btnImport" type="button" data-i18n="btnImport">导入备份数据</button>
         <input type="file" id="importFile" accept=".json,application/json" hidden>
       </div>
     </div>
     <div class="card">
-      <h3>危险与隐私操作</h3>
+      <h3 data-i18n="dangerZoneTitle">危险与隐私操作</h3>
       <div class="row-btns">
-        <button class="btn sm danger" id="btnWipeKeys" type="button">🔒 清除本机保存的所有 API Key</button>
-        <button class="btn sm danger" id="btnClearAll" type="button"><span data-icon="trash"></span>清空所有本地对话</button>
+        <button class="btn sm danger" id="btnWipeKeys" type="button" data-i18n="btnWipeKeys">🔒 清除本机保存的所有 API Key</button>
+        <button class="btn sm danger" id="btnClearAll" type="button"><span data-icon="trash"></span><span data-i18n="btnClearAll">清空所有本地对话</span></button>
       </div>
     </div>
   </div>
@@ -254,23 +264,23 @@
 <!-- 提示词库 -->
 <dialog class="dlg dlg-wide" id="dlgPrompts" aria-labelledby="dlgPromptsTitle" closedby="any">
   <div class="dlg-head">
-    <h2 id="dlgPromptsTitle">提示词库</h2>
+    <h2 id="dlgPromptsTitle" data-i18n="dlgPromptsTitle">提示词库</h2>
     <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
   </div>
   <div class="dlg-body">
     <div class="prov-layout">
       <div class="prov-side">
         <div class="prov-list" id="promptList"></div>
-        <button class="btn sm block" id="pr_new" type="button"><span data-icon="plus"></span>新建提示词</button>
+        <button class="btn sm block" id="pr_new" type="button"><span data-icon="plus"></span><span data-i18n="btnNewPrompt">新建提示词</span></button>
       </div>
       <div class="prov-form">
-        <label class="field"><span>模板名称</span><input class="input" id="pr_name"></label>
-        <label class="field"><span>提示词内容 <small class="dim" id="pr_tokens"></small></span><textarea class="input" id="pr_content" rows="11"></textarea></label>
+        <label class="field"><span data-i18n="prNameLabel">模板名称</span><input class="input" id="pr_name"></label>
+        <label class="field"><span data-i18n="prContentLabel">提示词内容</span> <small class="dim" id="pr_tokens"></small><textarea class="input" id="pr_content" rows="11"></textarea></label>
         <div class="row-btns">
-          <button class="btn sm primary" id="pr_apply" type="button">应用到当前对话</button>
-          <button class="btn sm" id="pr_default" type="button">设为新对话默认</button>
-          <button class="btn sm" id="pr_clearDefault" type="button">取消默认</button>
-          <button class="btn sm danger" id="pr_delete" type="button"><span data-icon="trash"></span>删除</button>
+          <button class="btn sm primary" id="pr_apply" type="button" data-i18n="btnApplyPrompt">应用到当前对话</button>
+          <button class="btn sm" id="pr_default" type="button" data-i18n="btnSetDefaultPrompt">设为新对话默认</button>
+          <button class="btn sm" id="pr_clearDefault" type="button" data-i18n="btnClearDefaultPrompt">取消默认</button>
+          <button class="btn sm danger" id="pr_delete" type="button"><span data-icon="trash"></span><span data-i18n="btnDeletePrompt">删除</span></button>
         </div>
         <p class="hint" id="pr_defaultHint"></p>
       </div>
@@ -281,10 +291,10 @@
 <!-- 上下文压缩与对话总结 -->
 <dialog class="dlg dlg-wide" id="dlgCompact" aria-labelledby="dlgCompactTitle" closedby="any">
   <div class="dlg-head">
-    <h2 id="dlgCompactTitle">上下文压缩与总结</h2>
+    <h2 id="dlgCompactTitle" data-i18n="dlgCompactTitle">上下文压缩与总结</h2>
     <div class="tabs" role="tablist">
-      <button type="button" role="tab" data-ctab="compact" aria-selected="true">📦 上下文压缩</button>
-      <button type="button" role="tab" data-ctab="summary" aria-selected="false">📝 对话总结</button>
+      <button type="button" role="tab" data-ctab="compact" aria-selected="true" data-i18n="tabCompact">📦 上下文压缩</button>
+      <button type="button" role="tab" data-ctab="summary" aria-selected="false" data-i18n="tabSummary">📝 对话总结</button>
     </div>
     <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
   </div>
@@ -293,43 +303,43 @@
     <div class="compact-stats" id="cp_stats"></div>
     <div class="grid2">
       <label class="field">
-        <span>保留最近几条消息不压缩 <small>(保留近期原文以维持连贯)</small></span>
+        <span><span data-i18n="cpKeepLabel">保留最近几条消息不压缩</span> <small data-i18n="cpKeepSub">(保留近期原文以维持连贯)</small></span>
         <input class="input" id="cp_keep" type="number" min="0" step="1" value="4">
       </label>
       <label class="field">
-        <span>用于生成压缩的模型 <small>(可选轻量模型省成本)</small></span>
+        <span><span data-i18n="cpModelLabel">用于生成压缩的模型</span> <small data-i18n="cpModelSub">(可选轻量模型省成本)</small></span>
         <select class="input" id="cp_model"></select>
       </label>
     </div>
     <div class="chips" id="cp_keepChips">
-      <button type="button" data-keep="0">全部压缩 (0)</button>
-      <button type="button" data-keep="2">保留 2 条</button>
-      <button type="button" data-keep="4">保留 4 条</button>
-      <button type="button" data-keep="6">保留 6 条</button>
-      <button type="button" data-keep="8">保留 8 条</button>
+      <button type="button" data-keep="0" data-i18n="cpKeep0">全部压缩 (0)</button>
+      <button type="button" data-keep="2" data-i18n="cpKeep2">保留 2 条</button>
+      <button type="button" data-keep="4" data-i18n="cpKeep4">保留 4 条</button>
+      <button type="button" data-keep="6" data-i18n="cpKeep6">保留 6 条</button>
+      <button type="button" data-keep="8" data-i18n="cpKeep8">保留 8 条</button>
     </div>
     <label class="field">
-      <span>压缩侧重点 <small>(可选，告诉 AI 重点保留哪些信息)</small></span>
-      <input class="input" id="cp_focus" placeholder="例如：保留所有文件路径、函数签名、配置参数与未解决的报错">
+      <span><span data-i18n="cpFocusLabel">压缩侧重点</span> <small data-i18n="cpFocusSub">(可选，告诉 AI 重点保留哪些信息)</small></span>
+      <input class="input" id="cp_focus" placeholder="例如：保留所有文件路径、函数签名、配置参数与未解决的报错" data-i18n-placeholder="cpFocusPlaceholder">
     </label>
     <div class="row-btns" style="margin-bottom:.7em">
-      <button class="btn sm primary" id="cp_generate" type="button"><span data-icon="sparkle"></span>AI 生成压缩摘要</button>
+      <button class="btn sm primary" id="cp_generate" type="button"><span data-icon="sparkle"></span><span data-i18n="btnGenCompact">AI 生成压缩摘要</span></button>
       <span class="status" id="cp_status"></span>
     </div>
     <label class="field">
-      <span>压缩摘要内容 <small class="dim" id="cp_tokens"></small></span>
-      <textarea class="input" id="cp_summary" rows="8" placeholder="点击上方“AI 生成压缩摘要”，也可直接在此手写或修改前文摘要。应用后，原早期消息将折叠归档（不丢失），后续请求仅发送本摘要＋最近保留消息。"></textarea>
+      <span data-i18n="cpSummaryLabel">压缩摘要内容</span> <small class="dim" id="cp_tokens"></small>
+      <textarea class="input" id="cp_summary" rows="8" placeholder="点击上方“AI 生成压缩摘要”，也可直接在此手写或修改前文摘要。应用后，原早期消息将折叠归档（不丢失），后续请求仅发送本摘要＋最近保留消息。" data-i18n-placeholder="cpSummaryPlaceholder"></textarea>
     </label>
     <div class="row-btns">
-      <button class="btn primary" id="cp_apply" type="button"><span data-icon="check"></span>应用压缩到当前对话</button>
-      <button class="btn danger" id="cp_revoke" type="button" hidden><span data-icon="trash"></span>撤销压缩（恢复原消息）</button>
+      <button class="btn primary" id="cp_apply" type="button"><span data-icon="check"></span><span data-i18n="btnApplyCompact">应用压缩到当前对话</span></button>
+      <button class="btn danger" id="cp_revoke" type="button" hidden><span data-icon="trash"></span><span data-i18n="btnRevokeCompact">撤销压缩（恢复原消息）</span></button>
     </div>
   </div>
 
   <div class="dlg-body" data-cpanel="summary" hidden>
     <div class="grid2">
       <div class="field">
-        <span>总结模板风格</span>
+        <span data-i18n="smStyleLabel">总结模板风格</span>
         <div class="chips" id="sm_styles" style="margin-bottom:0">
           <button type="button" data-style="structured" class="active">📋 结构化纪要</button>
           <button type="button" data-style="bullets">🎯 核心要点</button>
@@ -338,23 +348,23 @@
         </div>
       </div>
       <label class="field">
-        <span>用于生成总结的模型</span>
+        <span data-i18n="smModelLabel">用于生成总结的模型</span>
         <select class="input" id="sm_model"></select>
       </label>
     </div>
-    <label class="check"><input type="checkbox" id="sm_autoTitle" checked> 同时根据总结内容智能生成并更新对话标题</label>
+    <label class="check"><input type="checkbox" id="sm_autoTitle" checked> <span data-i18n="smAutoTitleCheck">同时根据总结内容智能生成并更新对话标题</span></label>
     <div class="row-btns" style="margin-bottom:.7em">
-      <button class="btn sm primary" id="sm_generate" type="button"><span data-icon="sparkle"></span>AI 生成对话总结</button>
-      <button class="btn sm" id="sm_toggleEdit" type="button"><span data-icon="edit"></span>编辑 Markdown</button>
+      <button class="btn sm primary" id="sm_generate" type="button"><span data-icon="sparkle"></span><span data-i18n="btnGenSummary">AI 生成对话总结</span></button>
+      <button class="btn sm" id="sm_toggleEdit" type="button"><span data-icon="edit"></span><span data-i18n="btnToggleEdit">编辑 Markdown</span></button>
       <span class="status" id="sm_status"></span>
     </div>
     <div class="summary-box md" id="sm_view"></div>
-    <textarea class="input" id="sm_raw" rows="10" hidden placeholder="在此查看或编辑对话总结 Markdown…"></textarea>
+    <textarea class="input" id="sm_raw" rows="10" hidden placeholder="在此查看或编辑对话总结 Markdown…" data-i18n-placeholder="smRawPlaceholder"></textarea>
     <div class="row-btns" style="margin-top:.8em">
-      <button class="btn sm" id="sm_copy" type="button"><span data-icon="copy"></span>复制总结</button>
-      <button class="btn sm" id="sm_export" type="button"><span data-icon="download"></span>导出总结 (.md)</button>
-      <button class="btn sm" id="sm_toCompact" type="button"><span data-icon="compress"></span>应用为上下文压缩</button>
-      <button class="btn sm primary" id="sm_fork" type="button"><span data-icon="plus"></span>携带总结开启新对话</button>
+      <button class="btn sm" id="sm_copy" type="button"><span data-icon="copy"></span><span data-i18n="btnCopySummary">复制总结</span></button>
+      <button class="btn sm" id="sm_export" type="button"><span data-icon="download"></span><span data-i18n="btnExportSummary">导出总结 (.md)</span></button>
+      <button class="btn sm" id="sm_toCompact" type="button"><span data-icon="compress"></span><span data-i18n="btnToCompact">应用为上下文压缩</span></button>
+      <button class="btn sm primary" id="sm_fork" type="button"><span data-icon="plus"></span><span data-i18n="btnForkSummary">携带总结开启新对话</span></button>
     </div>
   </div>
 </dialog>

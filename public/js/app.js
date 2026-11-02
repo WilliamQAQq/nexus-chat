@@ -1,7 +1,11 @@
 import { renderMarkdown } from './markdown.js';
 import { estimateTokens, messageTokens, formatTokens, guessContextWindow, IMAGE_TOKENS } from './tokens.js';
-import { sendChat, listModels, PRESETS, PROVIDER_TYPES, resolveEndpointPreview, detectLocalProxy, hasLocalProxy } from './api.js';
+import { sendChat, listModels, PRESETS, PROVIDER_TYPES, getProviderTypeName, resolveEndpointPreview, detectLocalProxy, hasLocalProxy } from './api.js';
 import * as db from './db.js';
+import {
+  t, getLang, setLang, relTime as i18nRelTime, LANG_OPTIONS,
+  PARAM_DEFS_I18N, DEFAULT_PROMPTS_I18N, SUMMARY_PROMPTS_I18N
+} from './i18n.js';
 
 // ======================= 基础工具 =======================
 const els = new Proxy({}, { get: (_, id) => document.getElementById(id) });
@@ -56,30 +60,30 @@ function showModal(dlg) {
 }
 
 function relTime(ts) {
-  const d = (Date.now() - ts) / 1000;
-  if (d < 60) return '刚刚';
-  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
-  if (d < 86400) return `${Math.floor(d / 3600)} 小时前`;
-  if (d < 86400 * 7) return `${Math.floor(d / 86400)} 天前`;
-  return new Date(ts).toLocaleDateString();
+  return i18nRelTime(ts, getLang());
 }
 const clock = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-const WEEKDAYS = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+const WEEKDAYS = {
+  'zh-CN': ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'],
+  'en': ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
+};
 function expandPrompt(raw, model = '') {
   if (!raw) return '';
   const now = new Date();
+  const lang = getLang();
+  const days = WEEKDAYS[lang] || WEEKDAYS['zh-CN'];
   return raw
-    .replaceAll('{{date}}', now.toLocaleDateString('zh-CN'))
-    .replaceAll('{{time}}', now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
-    .replaceAll('{{weekday}}', WEEKDAYS[now.getDay()])
+    .replaceAll('{{date}}', now.toLocaleDateString(lang === 'en' ? 'en-US' : 'zh-CN'))
+    .replaceAll('{{time}}', now.toLocaleTimeString(lang === 'en' ? 'en-US' : 'zh-CN', { hour: '2-digit', minute: '2-digit' }))
+    .replaceAll('{{weekday}}', days[now.getDay()])
     .replaceAll('{{model}}', model || '');
 }
 
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    toast('已复制');
+    toast(t('copied'));
     return;
   } catch {}
   try {
@@ -90,8 +94,8 @@ async function copyText(text) {
     ta.select();
     const ok = document.execCommand('copy');
     ta.remove();
-    toast(ok ? '已复制' : '复制失败，请手动选择复制');
-  } catch { toast('复制失败，请手动选择复制'); }
+    toast(ok ? t('copied') : t('toastCopyFailed'));
+  } catch { toast(t('toastCopyFailed')); }
 }
 
 function download(name, content, type = 'application/json') {
@@ -145,10 +149,12 @@ function loadSettings() {
   const out = {
     providers: [], lastTarget: null, defaultSystemPrompt: '', modelMeta: {},
     theme: 'system', sendKey: 'enter', fontSize: 15, ephemeralKeys: false,
+    language: s.language || 'auto',
     ...s,
     prompts: s.prompts ?? DEFAULT_PROMPTS,
     defaultParams: mergeParams(s.defaultParams),
   };
+  setLang(out.language);
   if (out.ephemeralKeys) {
     try {
       const kmap = JSON.parse(ssGet(KKEY) || '{}');
@@ -222,12 +228,12 @@ function defaultTarget() {
 }
 
 function makeConv() {
-  const t = defaultTarget();
+  const tTarget = defaultTarget();
   const params = clone(state.settings.defaultParams);
-  if (t.model) params.contextWindow = contextFor(t.model);
+  if (tTarget.model) params.contextWindow = contextFor(tTarget.model);
   return {
-    id: uid(), title: '新对话', createdAt: Date.now(), updatedAt: Date.now(), pinned: false,
-    providerId: t.providerId, model: t.model, systemPrompt: state.settings.defaultSystemPrompt, params, messages: [],
+    id: uid(), title: t('newChat'), createdAt: Date.now(), updatedAt: Date.now(), pinned: false,
+    providerId: tTarget.providerId, model: tTarget.model, systemPrompt: state.settings.defaultSystemPrompt, params, messages: [],
   };
 }
 
@@ -271,7 +277,7 @@ function selectConv(id) {
 
 async function deleteConv(id) {
   const c = state.convs.find((x) => x.id === id);
-  if (!c || !confirm(`确定删除对话「${c.title}」？`)) return;
+  if (!c || !confirm(t('confirmDeleteConv', c.title))) return;
   if (state.generating?.convId === id) stopGeneration();
   if (state.compacting?.convId === id) stopCompaction();
   state.convs = state.convs.filter((x) => x.id !== id);
@@ -284,9 +290,9 @@ async function deleteConv(id) {
 }
 
 function renameConv(conv) {
-  const t = prompt('重命名对话', conv.title);
-  if (t == null || !t.trim()) return;
-  conv.title = t.trim();
+  const title = prompt(t('renamePromptTitle'), conv.title);
+  if (title == null || !title.trim()) return;
+  conv.title = title.trim();
   saveConvSoon(conv, 0);
   renderConvList();
   renderHeader();
@@ -300,8 +306,14 @@ function openPanelTo(cardId, focusEl) {
 }
 
 // ======================= 上下文计算与压缩切分 =======================
-const COMPACT_PREFIX = '【前文对话压缩摘要】\n';
-const COMPACT_ACK = '我已了解上述前文背景与关键结论，请继续。';
+function getCompactPrefix() {
+  return getLang() === 'en' ? '[Prior Context Compression Summary]\n' : '【前文对话压缩摘要】\n';
+}
+function getCompactAck() {
+  return getLang() === 'en'
+    ? 'I have received and understood the context summary and key decisions above. Please proceed.'
+    : '我已了解上述前文背景与关键结论，请继续。';
+}
 
 function getCompactionSplit(conv) {
   const comp = conv?.compaction?.summary?.trim() ? conv.compaction : null;
@@ -322,8 +334,8 @@ function computeContext(conv, draftText = '', draftImages = 0) {
 
   const { comp, archived, active } = getCompactionSplit(conv);
   const compMsgs = comp ? [
-    { id: '__compact_u', role: 'user', content: COMPACT_PREFIX + comp.summary.trim() },
-    { id: '__compact_a', role: 'assistant', content: COMPACT_ACK },
+    { id: '__compact_u', role: 'user', content: getCompactPrefix() + comp.summary.trim() },
+    { id: '__compact_a', role: 'assistant', content: getCompactAck() },
   ] : [];
   const compTokens = comp ? messageTokens(compMsgs[0]) + messageTokens(compMsgs[1]) : 0;
   const archivedValid = archived.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
@@ -383,29 +395,35 @@ function renderConvList() {
       || c.summary?.content?.toLowerCase().includes(q)
       || c.messages.some((m) => m.content?.toLowerCase().includes(q)));
   if (!list.length) {
-    els.convList.innerHTML = `<div class="empty-hint">${q ? '没有匹配的对话' : '还没有对话<br>发送第一条消息开始吧'}</div>`;
+    els.convList.innerHTML = `<div class="empty-hint">${q ? t('noMatchConv') : t('emptyConvList')}</div>`;
     return;
   }
+  const isEn = getLang() === 'en';
   els.convList.replaceChildren(...list.map((c) => {
     const item = document.createElement('div');
     item.className = 'conv-item' + (c.id === state.currentId ? ' active' : '');
     item.dataset.id = c.id;
     item.innerHTML = `<button class="conv-main" type="button" data-op="open"><span class="conv-title"></span><span class="conv-sub"></span></button>
       <div class="conv-ops">
-        <button class="icon-btn sm" type="button" data-op="pin" title="${c.pinned ? '取消置顶' : '置顶'}">${icon('pin')}</button>
-        <button class="icon-btn sm" type="button" data-op="rename" title="重命名">${icon('edit')}</button>
-        <button class="icon-btn sm" type="button" data-op="delete" title="删除">${icon('trash')}</button>
+        <button class="icon-btn sm" type="button" data-op="pin" title="${c.pinned ? t('unpin') : t('pin')}">${icon('pin')}</button>
+        <button class="icon-btn sm" type="button" data-op="rename" title="${t('edit')}">${icon('edit')}</button>
+        <button class="icon-btn sm" type="button" data-op="delete" title="${t('delete')}">${icon('trash')}</button>
       </div>`;
     item.querySelector('.conv-title').textContent = (c.pinned ? '📌 ' : '') + c.title;
-    item.querySelector('.conv-sub').textContent = `${c.messages.length} 条消息${c.compaction?.summary ? ' · 📦' : ''} · ${relTime(c.updatedAt)}`;
+    const msgCount = `${c.messages.length} ${isEn ? (c.messages.length === 1 ? 'msg' : 'msgs') : '条消息'}`;
+    item.querySelector('.conv-sub').textContent = `${msgCount}${c.compaction?.summary ? ' · 📦' : ''} · ${relTime(c.updatedAt)}`;
     return item;
   }));
 }
 
 function renderHeader() {
   const conv = currentConv();
-  els.chatTitle.textContent = conv?.title ?? '新对话';
-  document.title = `${conv?.title ?? '新对话'} · Nexus Chat`;
+  const defaultTitle = t('newChat');
+  if (conv && (!conv.messages.length || conv.title === '新对话' || conv.title === 'New Chat')) {
+    conv.title = defaultTitle;
+  }
+  els.chatTitle.textContent = conv?.title ?? defaultTitle;
+  document.title = `${conv?.title ?? defaultTitle} · Nexus Chat`;
   renderModelSelect();
   updateTopTempPill();
 }
@@ -414,7 +432,8 @@ function updateTopTempPill() {
   const conv = currentConv();
   if (!conv) return;
   const p = conv.params;
-  els.topTempBtn.textContent = p.enabled.temperature ? `🌡 ${p.temperature}` : '🌡 默认';
+  const defText = getLang() === 'en' ? 'Default' : '默认';
+  els.topTempBtn.textContent = p.enabled.temperature ? `🌡 ${p.temperature}` : `🌡 ${defText}`;
 }
 
 const SEP = '\u0001';
@@ -424,23 +443,27 @@ function renderModelSelect() {
   sel.replaceChildren();
   const opt = (value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; return o; };
   const ps = state.settings.providers;
+  const isEn = getLang() === 'en';
   if (!ps.length) {
-    sel.append(opt('', '— 尚未配置 API —'), opt('__settings', '⚙ 添加 API 提供商…'));
+    sel.append(opt('', isEn ? '— No API Configured —' : '— 尚未配置 API —'), opt('__settings', isEn ? '⚙ Add API Provider…' : '⚙ 添加 API 提供商…'));
     sel.value = '';
     return;
   }
   for (const p of ps) {
     const g = document.createElement('optgroup');
-    g.label = p.name;
+    g.label = (isEn && p.enName) ? p.enName : p.name;
     const models = [...(p.models || [])];
     if (conv?.providerId === p.id && conv.model && !models.includes(conv.model)) models.unshift(conv.model);
-    if (!models.length) g.append(opt(`__custom${SEP}${p.id}`, '（无模型，点此手动输入）'));
+    if (!models.length) g.append(opt(`__custom${SEP}${p.id}`, isEn ? '(No models, click to enter manually)' : '（无模型，点此手动输入）'));
     models.forEach((m) => g.append(opt(`${p.id}${SEP}${m}`, m)));
     sel.append(g);
   }
   const tools = document.createElement('optgroup');
   tools.label = '──────────';
-  tools.append(opt(`__custom${SEP}${conv?.providerId ?? ps[0].id}`, '✎ 输入自定义模型名…'), opt('__settings', '⚙ 管理 API 提供商…'));
+  tools.append(
+    opt(`__custom${SEP}${conv?.providerId ?? ps[0].id}`, isEn ? '✎ Enter custom model…' : '✎ 输入自定义模型名…'),
+    opt('__settings', isEn ? '⚙ Manage API Providers…' : '⚙ 管理 API 提供商…')
+  );
   sel.append(tools);
   sel.value = conv?.providerId && conv.model ? `${conv.providerId}${SEP}${conv.model}` : '';
 }
@@ -454,7 +477,9 @@ function onModelChange() {
   if (v.startsWith('__custom')) {
     providerId = v.split(SEP)[1];
     const p = getProvider(providerId);
-    model = prompt(`为「${p?.name}」输入模型名称`, '')?.trim();
+    const pName = (getLang() === 'en' && p?.enName) ? p.enName : (p?.name || '');
+    const promptMsg = getLang() === 'en' ? `Enter model name for "${pName}"` : `为「${pName}」输入模型名称`;
+    model = prompt(promptMsg, '')?.trim();
     if (!model) { renderModelSelect(); return; }
     if (p && !p.models.includes(model)) { p.models.push(model); saveSettings(); }
   } else [providerId, model] = v.split(SEP);
@@ -485,14 +510,15 @@ function splitThink(m) {
 function welcomeEl() {
   const box = document.createElement('div');
   box.className = 'welcome';
+  const isEn = getLang() === 'en';
   if (!state.settings.providers.length) {
-    box.innerHTML = `<h2>欢迎使用 Nexus Chat</h2>
-      <p>一个可自由接入任意 AI API 的增强型聊天工作台。<br>支持 OpenAI 兼容协议、Anthropic Claude、Google Gemini，自带本地跨域代理、上下文窗口额度监控、提示词库与多维生成参数控制。</p>
-      <div class="row-btns" style="justify-content:center;margin-top:20px"><button class="btn primary" type="button" data-act="open-settings">${icon('plus')}添加第一个 API 提供商</button></div>`;
+    box.innerHTML = `<h2>${t('welcomeNoApiTitle')}</h2>
+      <p>${t('welcomeNoApiDesc')}</p>
+      <div class="row-btns" style="justify-content:center;margin-top:20px"><button class="btn primary" type="button" data-act="open-settings">${icon('plus')}${t('addFirstApiBtn')}</button></div>`;
   } else {
     const conv = currentConv();
-    box.innerHTML = `<h2>有什么可以帮你？</h2><p>当前模型：<b></b></p><div class="persona-bar"><span class="label">角色提示词：</span></div><div class="suggestions"></div>`;
-    box.querySelector('b').textContent = conv?.model || '未选择';
+    box.innerHTML = `<h2>${t('welcomeTitle')}</h2><p>${t('currentModelLabel')}<b></b></p><div class="persona-bar"><span class="label">${t('rolePromptLabel')}</span></div><div class="suggestions"></div>`;
+    box.querySelector('b').textContent = conv?.model || (isEn ? 'None selected' : '未选择');
 
     const pbar = box.querySelector('.persona-bar');
     const noneBtn = document.createElement('button');
@@ -500,7 +526,7 @@ function welcomeEl() {
     noneBtn.className = 'persona-chip' + (!conv?.systemPrompt?.trim() ? ' active' : '');
     noneBtn.dataset.act = 'persona';
     noneBtn.dataset.prompt = '';
-    noneBtn.textContent = '无预设';
+    noneBtn.textContent = t('noPresetChip');
     pbar.append(noneBtn);
     state.settings.prompts.slice(0, 6).forEach((pr) => {
       const b = document.createElement('button');
@@ -515,13 +541,13 @@ function welcomeEl() {
     editBtn.type = 'button';
     editBtn.className = 'persona-chip';
     editBtn.dataset.act = 'edit-sys';
-    editBtn.textContent = '✎ 编辑提示词…';
+    editBtn.textContent = t('editSysPromptChip');
     pbar.append(editBtn);
 
     const s = box.querySelector('.suggestions');
-    ['用通俗的类比解释 Transformer 注意力机制', '写一个带并发控制的 TypeScript 异步队列', '帮我审查并优化一段 SQL 查询性能', '为新产品构思 5 句打动人心的 Slogan'].forEach((t) => {
+    [t('suggest1'), t('suggest2'), t('suggest3'), t('suggest4')].forEach((txt) => {
       const b = document.createElement('button');
-      b.type = 'button'; b.dataset.act = 'suggest'; b.textContent = t;
+      b.type = 'button'; b.dataset.act = 'suggest'; b.textContent = txt;
       s.append(b);
     });
   }
@@ -545,8 +571,8 @@ function renderMessages(forceBottom = false) {
     const d = document.createElement('details');
     d.className = 'sys-banner';
     d.open = prevSysOpen;
-    d.innerHTML = `<summary><span class="sys-sum"></span><button class="btn sm" type="button" data-act="edit-sys">编辑</button></summary><div class="sys-text"></div>`;
-    d.querySelector('.sys-sum').textContent = `⚙ 系统提示词 · 约 ${formatTokens(ctx.sys)} tokens`;
+    d.innerHTML = `<summary><span class="sys-sum"></span><button class="btn sm" type="button" data-act="edit-sys">${t('edit')}</button></summary><div class="sys-text"></div>`;
+    d.querySelector('.sys-sum').textContent = t('sysBannerSummary', formatTokens(ctx.sys));
     d.querySelector('.sys-text').textContent = conv.systemPrompt;
     inner.append(d);
   }
@@ -555,7 +581,7 @@ function renderMessages(forceBottom = false) {
     arc.className = 'compact-archive';
     arc.open = prevArcOpen;
     const sum = document.createElement('summary');
-    sum.textContent = `📦 已压缩归档早期对话（${archived.length} 条原始消息 · 已由下方摘要替代发送，点击展开查看）`;
+    sum.textContent = t('archiveBannerSummary', archived.length);
     const list = document.createElement('div');
     list.className = 'compact-archive-list';
     archived.forEach((m) => list.append(messageEl(m, conv, ctx, true)));
@@ -569,16 +595,16 @@ function renderMessages(forceBottom = false) {
     cb.innerHTML = `<summary>
       <span class="compact-title"><span class="cmp-label"></span></span>
       <span class="row-btns" style="margin:0">
-        <button class="btn sm" type="button" data-act="compact-open">编辑</button>
-        <button class="btn sm" type="button" data-act="compact-copy">复制</button>
-        <button class="btn sm danger" type="button" data-act="compact-revoke">撤销</button>
+        <button class="btn sm" type="button" data-act="compact-open">${t('edit')}</button>
+        <button class="btn sm" type="button" data-act="compact-copy">${t('copy')}</button>
+        <button class="btn sm danger" type="button" data-act="compact-revoke">${t('cancel')}</button>
       </span>
     </summary><div class="compact-body md"></div>`;
-    cb.querySelector('.cmp-label').textContent = `✨ 上下文压缩摘要 · 约 ${formatTokens(ctx.comp)} tokens`;
+    cb.querySelector('.cmp-label').textContent = t('compactBannerSummary', formatTokens(ctx.comp));
     if (ctx.savedTokens > 0) {
       const badge = document.createElement('span');
       badge.className = 'tag ok';
-      badge.textContent = `已省 ≈ ${formatTokens(ctx.savedTokens)} tokens`;
+      badge.textContent = t('savedTokensBadge', formatTokens(ctx.savedTokens));
       cb.querySelector('.compact-title').append(badge);
     }
     cb.querySelector('.compact-body').innerHTML = renderMarkdown(comp.summary);
@@ -597,7 +623,7 @@ function messageEl(m, conv, ctx, isArchived = false) {
   el.dataset.id = m.id;
   if (m.error) el.classList.add('error');
   else if (!isArchived && !m.pending && !ctx.includedIds.has(m.id)) el.classList.add('excluded');
-  el.innerHTML = `<div class="avatar">${m.role === 'user' ? '你' : 'AI'}</div>
+  el.innerHTML = `<div class="avatar">${m.role === 'user' ? t('you') : t('ai')}</div>
     <div class="msg-body"><div class="msg-meta"></div><div class="msg-content"></div><div class="msg-actions"></div></div>`;
   fillMeta(el, m, ctx, isArchived);
   if (state.editingMsgId === m.id) fillEditor(el, m);
@@ -610,12 +636,15 @@ function fillMeta(el, m, ctx, isArchived = false) {
   const meta = el.querySelector('.msg-meta');
   meta.innerHTML = '';
   const b = document.createElement('b');
-  b.textContent = m.role === 'user' ? '你' : (m.model || 'AI');
+  b.textContent = m.role === 'user' ? t('you') : (m.model || t('ai'));
   meta.append(b);
   const add = (text, cls = '') => { const s = document.createElement('span'); s.textContent = text; if (cls) s.className = cls; meta.append(s); };
   add(clock(m.time));
+  const isEn = getLang() === 'en';
   if (m.usage && (m.usage.prompt || m.usage.completion)) {
-    add(`输入 ${formatTokens(m.usage.prompt)} · 输出 ${formatTokens(m.usage.completion)} tokens`);
+    add(isEn
+      ? `Input ${formatTokens(m.usage.prompt)} · Output ${formatTokens(m.usage.completion)} tokens`
+      : `输入 ${formatTokens(m.usage.prompt)} · 输出 ${formatTokens(m.usage.completion)} tokens`);
   } else if (!m.pending && !m.error) add(`≈ ${formatTokens(messageTokens(m))} tokens`);
   if (m.duration && !m.pending) {
     const sec = m.duration / 1000;
@@ -624,11 +653,11 @@ function fillMeta(el, m, ctx, isArchived = false) {
     add(s);
   }
   if (isArchived && !m.error) {
-    add('已归档压缩', 'tag info');
+    add(t('tagArchived'), 'tag info');
   } else if (ctx && !m.pending && !m.error && !ctx.includedIds.has(m.id)) {
-    add(m.excluded ? '已手动移出上下文' : '超出窗口未携带', 'tag warn');
+    add(m.excluded ? t('tagManualExcluded') : t('tagWindowTruncated'), 'tag warn');
   }
-  if (m.finish === 'length' || m.finish === 'max_tokens' || m.finish === 'MAX_TOKENS') add('因达到最大输出长度而截断', 'tag warn');
+  if (m.finish === 'length' || m.finish === 'max_tokens' || m.finish === 'MAX_TOKENS') add(t('tagLengthTruncated'), 'tag warn');
 }
 
 function fillContent(el, m) {
@@ -656,7 +685,7 @@ function fillContent(el, m) {
     d.className = 'reasoning';
     d.open = prevDetails ? prevDetails.open : (m.pending && !content);
     const sum = document.createElement('summary');
-    sum.textContent = m.pending && !content ? '💭 思考中…' : `💭 思考过程（约 ${formatTokens(estimateTokens(reasoning))} tokens）`;
+    sum.textContent = m.pending && !content ? t('reasoningThinking') : t('reasoningTitle', formatTokens(estimateTokens(reasoning)));
     const body = document.createElement('div');
     body.className = 'md';
     body.innerHTML = renderMarkdown(reasoning);
@@ -687,7 +716,7 @@ function fillContent(el, m) {
   if (m.stopped) {
     const n = document.createElement('div');
     n.className = 'note';
-    n.textContent = '⏹ 已手动停止生成';
+    n.textContent = t('stoppedNote');
     c.append(n);
   }
 }
@@ -695,9 +724,9 @@ function fillContent(el, m) {
 function fillEditor(el, m) {
   const c = el.querySelector('.msg-content');
   c.innerHTML = `<div class="edit-box"><textarea class="input"></textarea>
-    <div class="row-btns">${m.role === 'user' ? '<button class="btn sm primary" type="button" data-act="edit-send">保存并重新发送</button>' : ''}
-    <button class="btn sm ${m.role === 'user' ? '' : 'primary'}" type="button" data-act="edit-save">保存</button>
-    <button class="btn sm" type="button" data-act="edit-cancel">取消</button></div></div>`;
+    <div class="row-btns">${m.role === 'user' ? `<button class="btn sm primary" type="button" data-act="edit-send">${t('saveAndResend')}</button>` : ''}
+    <button class="btn sm ${m.role === 'user' ? '' : 'primary'}" type="button" data-act="edit-save">${t('save')}</button>
+    <button class="btn sm" type="button" data-act="edit-cancel">${t('cancel')}</button></div></div>`;
   const ta = c.querySelector('textarea');
   ta.value = m.content;
   requestAnimationFrame(() => { ta.focus(); ta.style.height = Math.min(ta.scrollHeight + 4, innerHeight * 0.5) + 'px'; });
@@ -709,12 +738,12 @@ function fillActions(el, m, isArchived = false) {
   const busy = !!(state.generating || state.compacting);
   const btn = (act, ic, title, disabled = false) =>
     `<button class="icon-btn sm" type="button" data-act="${act}" title="${title}" aria-label="${title}"${disabled ? ' disabled' : ''}>${icon(ic)}</button>`;
-  let html = btn('copy', 'copy', '复制');
+  let html = btn('copy', 'copy', t('copy'));
   if (!m.error && !isArchived) {
-    html += btn('toggle-ctx', m.excluded ? 'eye' : 'eyeOff', m.excluded ? '重新纳入上下文' : '从上下文中移出（节省额度）', busy);
+    html += btn('toggle-ctx', m.excluded ? 'eye' : 'eyeOff', m.excluded ? t('includeInCtx') : t('excludeFromCtx'), busy);
   }
-  if (m.role === 'assistant') html += btn('regen', 'refresh', m.error ? '重试' : '重新生成', busy);
-  html += btn('edit', 'edit', '编辑', busy) + btn('delete', 'trash', '删除', busy);
+  if (m.role === 'assistant') html += btn('regen', 'refresh', m.error ? t('retry') : t('regen'), busy);
+  html += btn('edit', 'edit', t('edit'), busy) + btn('delete', 'trash', t('delete'), busy);
   a.innerHTML = html;
 }
 
@@ -733,7 +762,8 @@ function scheduleStreamRender(conv, m) {
 
 // ---------- 右侧面板 ----------
 function buildParamList() {
-  els.paramList.innerHTML = PARAM_DEFS.map((d) => `
+  const defs = PARAM_DEFS_I18N[getLang()] || PARAM_DEFS_I18N['zh-CN'];
+  els.paramList.innerHTML = defs.map((d) => `
     <div class="param" data-key="${d.key}">
       <div class="param-head">
         <label><input type="checkbox" data-role="enabled"> ${d.label}</label>
@@ -781,6 +811,7 @@ function scheduleMeter() { if (!meterRaf) meterRaf = requestAnimationFrame(() =>
 function updateMeter() {
   const conv = currentConv();
   if (!conv) return;
+  const isEn = getLang() === 'en';
   const imgs = state.attachments.filter((a) => a.kind === 'image').length;
   const ctx = computeContext(conv, composeText(), imgs);
   const pct = (x) => `${Math.max(0, Math.min(100, (x / ctx.limit) * 100))}%`;
@@ -798,10 +829,16 @@ function updateMeter() {
   setBar(els.meterBar);
   els.meter.className = `meter ${level}`;
   const trimmed = ctx.trimmedByWindow + ctx.limitedByCount + ctx.manualExcluded;
-  els.meterText.textContent = `上下文 ${formatTokens(ctx.used)} / ${formatTokens(ctx.limit)}` +
-    (ctx.hasCompaction ? ` · 📦已压缩${ctx.savedTokens ? '(省' + formatTokens(ctx.savedTokens) + ')' : ''}` : '') +
-    (ctx.reserve ? ` · 预留 ${formatTokens(ctx.reserve)}` : '') + (trimmed ? ` · 已排除 ${trimmed} 条` : '');
-  els.inputTokens.textContent = ctx.input ? `本条 ≈ ${formatTokens(ctx.input)}` : '';
+  const ctxLabel = isEn ? 'Context' : '上下文';
+  const compactedLabel = isEn ? ' · 📦compacted' : ' · 📦已压缩';
+  const savedLabel = ctx.savedTokens ? (isEn ? `(saves ${formatTokens(ctx.savedTokens)})` : `(省${formatTokens(ctx.savedTokens)})`) : '';
+  const reservedLabel = ctx.reserve ? (isEn ? ` · reserved ${formatTokens(ctx.reserve)}` : ` · 预留 ${formatTokens(ctx.reserve)}`) : '';
+  const excludedLabel = trimmed ? (isEn ? ` · ${trimmed} excluded` : ` · 已排除 ${trimmed} 条`) : '';
+
+  els.meterText.textContent = `${ctxLabel} ${formatTokens(ctx.used)} / ${formatTokens(ctx.limit)}` +
+    (ctx.hasCompaction ? `${compactedLabel}${savedLabel}` : '') +
+    reservedLabel + excludedLabel;
+  els.inputTokens.textContent = ctx.input ? t('inputTokensThis', formatTokens(ctx.input)) : '';
 
   // 顶栏上下文胶囊
   const totalPct = Math.round(ratio * 100);
@@ -817,26 +854,26 @@ function updateMeter() {
   }
 
   els.ctxDetail.innerHTML = `
-    <div class="ctx-big">${formatTokens(ctx.used)} <small>/ ${formatTokens(ctx.limit)} tokens（含预留占 ${(ratio * 100).toFixed(1)}%）</small></div>
+    <div class="ctx-big">${formatTokens(ctx.used)} <small>/ ${formatTokens(ctx.limit)} tokens（${isEn ? `including reserve ${(ratio * 100).toFixed(1)}%` : `含预留占 ${(ratio * 100).toFixed(1)}%`}）</small></div>
     <div class="meter-bar"><i class="seg sys"></i><i class="seg cmp"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i></div>
     <div class="ctx-rows">
-      <i class="dot" style="background:var(--seg-sys)"></i><span>系统提示词</span><span class="num">${formatTokens(ctx.sys)}</span>
-      ${ctx.hasCompaction ? `<i class="dot" style="background:var(--seg-cmp)"></i><span>压缩摘要（替代 ${ctx.archivedCount} 条${ctx.savedTokens ? '，省 ' + formatTokens(ctx.savedTokens) : ''}）</span><span class="num">${formatTokens(ctx.comp)}</span>` : ''}
-      <i class="dot" style="background:var(--seg-hist)"></i><span>携带历史（${ctx.includedActiveCount}/${ctx.totalMsgs} 条）</span><span class="num">${formatTokens(ctx.history)}</span>
-      <i class="dot" style="background:var(--seg-inp)"></i><span>正在输入</span><span class="num">${formatTokens(ctx.input)}</span>
-      <i class="dot seg res"></i><span>预留输出 (max_tokens)</span><span class="num">${formatTokens(ctx.reserve)}</span>
-      <i></i><span><b>剩余可用额度</b></span><span class="num"><b>${free >= 0 ? formatTokens(free) : '-' + formatTokens(-free)}</b></span>
+      <i class="dot" style="background:var(--seg-sys)"></i><span>${t('ctxRowSys')}</span><span class="num">${formatTokens(ctx.sys)}</span>
+      ${ctx.hasCompaction ? `<i class="dot" style="background:var(--seg-cmp)"></i><span>${t('ctxRowComp', ctx.archivedCount, ctx.savedTokens ? (isEn ? `saves ${formatTokens(ctx.savedTokens)}` : `省 ${formatTokens(ctx.savedTokens)}`) : '')}</span><span class="num">${formatTokens(ctx.comp)}</span>` : ''}
+      <i class="dot" style="background:var(--seg-hist)"></i><span>${t('ctxRowHist', ctx.includedActiveCount, ctx.totalMsgs)}</span><span class="num">${formatTokens(ctx.history)}</span>
+      <i class="dot" style="background:var(--seg-inp)"></i><span>${t('ctxRowInp')}</span><span class="num">${formatTokens(ctx.input)}</span>
+      <i class="dot seg res"></i><span>${t('ctxRowRes')}</span><span class="num">${formatTokens(ctx.reserve)}</span>
+      <i></i><span><b>${t('ctxRowFree')}</b></span><span class="num"><b>${free >= 0 ? formatTokens(free) : '-' + formatTokens(-free)}</b></span>
     </div>
-    ${ctx.manualExcluded ? `<div class="ctx-alert warn">👁 已手动移出 ${ctx.manualExcluded} 条消息（可点击消息下方眼睛图标恢复）</div>` : ''}
-    ${ctx.trimmedByWindow ? `<div class="ctx-alert warn">⚠ 已自动截断最早的 ${ctx.trimmedByWindow} 条消息以适应窗口（建议改用“压缩上下文”保留早期记忆）</div>` : ''}
-    ${ctx.limitedByCount ? `<div class="ctx-alert warn">ℹ 受“携带历史条数”限制，排除了 ${ctx.limitedByCount} 条较早消息</div>` : ''}
-    ${ratio > 1 ? `<div class="ctx-alert danger">⛔ 预计超出上下文窗口 ${formatTokens(ctx.total - ctx.limit)} tokens，请求可能报错。建议点击上方“压缩上下文”浓缩早期历史，或调小 max_tokens。</div>`
-      : ratio > 0.8 ? '<div class="ctx-alert warn">⚠ 上下文额度占用已超 80%，可使用“压缩上下文”大幅节省 Token 且不丢关键背景。</div>' : ''}
+    ${ctx.manualExcluded ? `<div class="ctx-alert warn">${t('ctxAlertManualExcluded', ctx.manualExcluded)}</div>` : ''}
+    ${ctx.trimmedByWindow ? `<div class="ctx-alert warn">${t('ctxAlertTrimmed', ctx.trimmedByWindow)}</div>` : ''}
+    ${ctx.limitedByCount ? `<div class="ctx-alert warn">${t('ctxAlertLimited', ctx.limitedByCount)}</div>` : ''}
+    ${ratio > 1 ? `<div class="ctx-alert danger">${t('ctxAlertDanger', formatTokens(ctx.total - ctx.limit))}</div>`
+      : ratio > 0.8 ? `<div class="ctx-alert warn">${t('ctxAlertWarn80')}</div>` : ''}
     ${(lastUsage || sumPrompt || sumComp) ? `<div class="ctx-actual">
-      ${lastUsage ? `<div>上次实际用量：输入 ${formatTokens(lastUsage.prompt)} · 输出 ${formatTokens(lastUsage.completion)} tokens</div>` : ''}
-      ${(sumPrompt || sumComp) ? `<div>本对话累计真实消耗：输入 ${formatTokens(sumPrompt)} · 输出 ${formatTokens(sumComp)} · 共 ${formatTokens(sumPrompt + sumComp)} tokens</div>` : ''}
+      ${lastUsage ? t('ctxActualUsage', formatTokens(lastUsage.prompt), formatTokens(lastUsage.completion)) : ''}
+      ${(sumPrompt || sumComp) ? t('ctxTotalUsage', formatTokens(sumPrompt), formatTokens(sumComp), formatTokens(sumPrompt + sumComp)) : ''}
     </div>` : ''}
-    <p class="hint">实时条为本地估算（中文≈1 token/字，英文≈3.8 字符/token，图片≈${IMAGE_TOKENS}），发送后显示 API 真实账单用量。</p>`;
+    <p class="hint">${t('ctxHintFoot', IMAGE_TOKENS)}</p>`;
   setBar(els.ctxDetail.querySelector('.meter-bar'));
 }
 
@@ -844,8 +881,8 @@ function updateSendBtn() {
   const gen = state.generating && state.generating.convId === currentConv()?.id;
   els.btnSend.classList.toggle('stop', !!gen);
   els.btnSend.innerHTML = icon(gen ? 'stop' : 'send');
-  els.btnSend.setAttribute('aria-label', gen ? '停止生成' : '发送');
-  els.btnSend.title = gen ? '停止生成' : '发送';
+  els.btnSend.setAttribute('aria-label', gen ? t('stopBtn') : t('sendBtn'));
+  els.btnSend.title = gen ? t('stopBtn') : t('sendBtn');
 }
 
 // ======================= 附件 =======================
@@ -924,8 +961,8 @@ async function send() {
   if (!conv.model) { toast('请先选择或输入模型名称'); els.selModel.focus(); return; }
 
   conv.messages.push({ id: uid(), role: 'user', content, images, time: Date.now() });
-  if (conv.title === '新对话') {
-    conv.title = (els.input.value.trim() || state.attachments[0]?.name || '新对话').replace(/\s+/g, ' ').slice(0, 30);
+  if (conv.title === '新对话' || conv.title === 'New Chat') {
+    conv.title = (els.input.value.trim() || state.attachments[0]?.name || t('newChat')).replace(/\s+/g, ' ').slice(0, 30);
     renderHeader();
   }
   if (conv === state.draft) { state.convs.push(conv); state.draft = null; }
@@ -1116,7 +1153,7 @@ function exportChatMarkdown() {
 // ======================= 设置对话框 =======================
 function maskKeyInput() {
   els.pf_apiKey.type = 'password';
-  els.pf_toggleKey.textContent = '显示';
+  els.pf_toggleKey.textContent = getLang() === 'en' ? 'Show' : '显示';
 }
 
 function openSettings(tab = 'providers') {
@@ -1124,6 +1161,7 @@ function openSettings(tab = 'providers') {
   if (!state.editingProviderId || !getProvider(state.editingProviderId)) state.editingProviderId = state.settings.providers[0]?.id ?? null;
   maskKeyInput();
   renderProviders();
+  if (els.set_language) els.set_language.value = state.settings.language || 'auto';
   els.set_theme.value = state.settings.theme;
   els.set_sendKey.value = state.settings.sendKey;
   els.set_fontSize.value = state.settings.fontSize;
@@ -1136,12 +1174,29 @@ function switchTab(tab) {
   els.dlgSettings.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
 }
 
+function renderPresetSelect() {
+  const isEn = getLang() === 'en';
+  els.presetSelect.replaceChildren();
+  const emptyOpt = document.createElement('option');
+  emptyOpt.value = '';
+  emptyOpt.textContent = isEn ? '＋ Add Provider Preset…' : '＋ 添加提供商…';
+  els.presetSelect.append(emptyOpt);
+  PRESETS.forEach((p, i) => {
+    const o = document.createElement('option');
+    o.value = i;
+    o.textContent = (isEn && p.enName) ? p.enName : p.name;
+    els.presetSelect.append(o);
+  });
+}
+
 function updateEndpointHint(p) {
-  els.pf_endpoint.textContent = p ? `实际对话端点：${resolveEndpointPreview(p, p.models?.[0])}` : '';
+  const isEn = getLang() === 'en';
+  els.pf_endpoint.textContent = p ? `${isEn ? 'Actual Chat Endpoint' : '实际对话端点'}：${resolveEndpointPreview(p, p.models?.[0])}` : '';
 }
 
 function renderProviders() {
   const ps = state.settings.providers;
+  const isEn = getLang() === 'en';
   els.providerList.replaceChildren(...ps.map((p) => {
     const b = document.createElement('button');
     b.type = 'button';
@@ -1149,10 +1204,12 @@ function renderProviders() {
     b.dataset.id = p.id;
     const nm = document.createElement('span');
     nm.className = 'name';
-    nm.textContent = p.name || '(未命名)';
+    nm.textContent = p.name || (isEn ? '(Unnamed)' : '(未命名)');
     const sub = document.createElement('span');
     sub.className = 'sub';
-    sub.textContent = `${PROVIDER_TYPES[p.type]} · ${p.models?.length ?? 0} 个模型`;
+    const typeLabel = getProviderTypeName(p.type, getLang());
+    const modelCountText = isEn ? `${p.models?.length ?? 0} models` : `${p.models?.length ?? 0} 个模型`;
+    sub.textContent = `${typeLabel} · ${modelCountText}`;
     b.append(nm, sub);
     return b;
   }));
@@ -1180,8 +1237,9 @@ function renderProviders() {
 
 function addProviderFromPreset(idx) {
   const pr = PRESETS[idx];
+  const isEn = getLang() === 'en';
   const p = {
-    id: uid(), name: pr.name, type: pr.type, baseUrl: pr.baseUrl, apiKey: pr.apiKey ?? '',
+    id: uid(), name: (isEn && pr.enName) ? pr.enName : pr.name, type: pr.type, baseUrl: pr.baseUrl, apiKey: pr.apiKey ?? '',
     models: [...pr.models], proxyUrl: '', customHeaders: '', useProxy: hasLocalProxy(), streamUsage: true,
   };
   state.settings.providers.push(p);
@@ -1468,16 +1526,31 @@ function planCompaction(conv, keepCount) {
 }
 
 async function requestCompactionSummary({ provider, model, plan, focus = '', stream = true, signal, onProgress }) {
-  const sys = '你是一名专业的 AI 对话上下文压缩引擎。请将给定的早期对话高密度浓缩为供后续对话继续使用的「上下文记忆摘要」。\n' +
-    '核心要求：\n' +
-    '1. 完整保留用户的核心目标、偏好设定、约束条件、已确认的结论与决策；\n' +
-    '2. 精确保留关键技术细节：文件路径、函数/类名、接口协议、配置参数、关键代码片段、报错信息及已排除的错误方案；\n' +
-    '3. 明确列出当前进展与尚未解决的问题/下一步待办；\n' +
-    '4. 语言精炼、条理清晰（使用紧凑的 Markdown 分点），剔除寒暄、重复尝试与冗余铺垫，不编造对话中未出现的信息，直接输出摘要正文。';
-  const focusLine = focus.trim() ? `\n\n【用户特别指定需重点保留的内容】：${focus.trim()}` : '';
+  const isEn = getLang() === 'en';
+  const sys = isEn
+    ? 'You are a professional AI conversation context compression engine. High-density condense the provided prior conversation into a "Context Memory Summary" for subsequent conversation turns.\n' +
+      'Core Requirements:\n' +
+      '1. Fully retain user core goals, preferences, constraints, confirmed decisions, and conclusions;\n' +
+      '2. Accurately preserve technical details: file paths, function/class names, API protocols, configuration params, key code snippets, error traces, and ruled-out solutions;\n' +
+      '3. Explicitly state current progress and pending tasks/next steps;\n' +
+      '4. Concise and structured in Markdown bullet points. Remove pleasantries and duplicate trials. Do not hallucinate. Output summary directly.'
+    : '你是一名专业的 AI 对话上下文压缩引擎。请将给定的早期对话高密度浓缩为供后续对话继续使用的「上下文记忆摘要」。\n' +
+      '核心要求：\n' +
+      '1. 完整保留用户的核心目标、偏好设定、约束条件、已确认的结论与决策；\n' +
+      '2. 精确保留关键技术细节：文件路径、函数/类名、接口协议、配置参数、关键代码片段、报错信息及已排除的错误方案；\n' +
+      '3. 明确列出当前进展与尚未解决的问题/下一步待办；\n' +
+      '4. 语言精炼、条理清晰（使用紧凑的 Markdown 分点），剔除寒暄、重复尝试与冗余铺垫，不编造对话中未出现的信息，直接输出摘要正文。';
+
+  const focusLine = focus.trim()
+    ? (isEn ? `\n\n[Priority Retain Focus]: ${focus.trim()}` : `\n\n【用户特别指定需重点保留的内容】：${focus.trim()}`)
+    : '';
   const userPrompt = plan.incremental
-    ? `以下是此前已归档的前序上下文摘要，以及后续新增的对话记录。请将二者合并更新为一份完整、连贯、去重后的最新上下文压缩摘要：${focusLine}\n\n<existing_summary>\n${plan.baseSummary}\n</existing_summary>\n\n<new_messages>\n${formatTranscript(plan.deltaMsgs)}\n</new_messages>`
-    : `请将以下早期对话记录浓缩为上下文压缩摘要：${focusLine}\n\n<conversation>\n${formatTranscript(plan.toSummarize)}\n</conversation>`;
+    ? (isEn
+        ? `Here is the prior archived context summary, followed by newly added conversation messages. Merge and update them into a single coherent, deduplicated, and complete latest context summary:${focusLine}\n\n<existing_summary>\n${plan.baseSummary}\n</existing_summary>\n\n<new_messages>\n${formatTranscript(plan.deltaMsgs)}\n</new_messages>`
+        : `以下是此前已归档的前序上下文摘要，以及后续新增的对话记录。请将二者合并更新为一份完整、连贯、去重后的最新上下文压缩摘要：${focusLine}\n\n<existing_summary>\n${plan.baseSummary}\n</existing_summary>\n\n<new_messages>\n${formatTranscript(plan.deltaMsgs)}\n</new_messages>`)
+    : (isEn
+        ? `Please condense the following earlier conversation turns into a context compression summary:${focusLine}\n\n<conversation>\n${formatTranscript(plan.toSummarize)}\n</conversation>`
+        : `请将以下早期对话记录浓缩为上下文压缩摘要：${focusLine}\n\n<conversation>\n${formatTranscript(plan.toSummarize)}\n</conversation>`);
 
   const isReasoning = /^(o[134](-|$)|gpt-5|deepseek-reasoner)/i.test(model);
   let raw = '';
@@ -1578,9 +1651,14 @@ function switchCompactTab(tab) {
 
 function syncCompactBusyUI() {
   const kind = state.compacting?.kind || null;
-  els.cp_generate.innerHTML = kind === 'compact' ? `${icon('stop')}停止生成` : `${icon('sparkle')}AI 生成压缩摘要`;
+  const isEn = getLang() === 'en';
+  els.cp_generate.innerHTML = kind === 'compact'
+    ? `${icon('stop')}${isEn ? 'Stop Generating' : '停止生成'}`
+    : `${icon('sparkle')}${isEn ? 'AI Generate Compression' : 'AI 生成压缩摘要'}`;
   els.cp_generate.disabled = kind === 'summary';
-  els.sm_generate.innerHTML = kind === 'summary' ? `${icon('stop')}停止生成` : `${icon('sparkle')}AI 生成对话总结`;
+  els.sm_generate.innerHTML = kind === 'summary'
+    ? `${icon('stop')}${isEn ? 'Stop Generating' : '停止生成'}`
+    : `${icon('sparkle')}${t('btnGenSummary')}`;
   els.sm_generate.disabled = kind === 'compact';
   updateCompactPreview();
   updateSummaryButtons();
@@ -1595,21 +1673,36 @@ function updateCompactPreview() {
   });
   const draftSummary = els.cp_summary.value.trim();
   const sumTok = draftSummary
-    ? messageTokens({ role: 'user', content: COMPACT_PREFIX + draftSummary }) + messageTokens({ role: 'assistant', content: COMPACT_ACK })
+    ? messageTokens({ role: 'user', content: getCompactPrefix() + draftSummary }) + messageTokens({ role: 'assistant', content: getCompactAck() })
     : 0;
   const saved = draftSummary ? Math.max(0, plan.originalTokens - sumTok) : 0;
+  const isEn = getLang() === 'en';
   els.cp_tokens.textContent = draftSummary
-    ? `（携带约 ${formatTokens(sumTok)} tokens${saved > 0 ? ` · 预计净省 ≈ ${formatTokens(saved)} tokens` : ''}）`
-    : '（支持 AI 自动提炼或手动输入背景摘要）';
+    ? (isEn
+        ? `(carries ~${formatTokens(sumTok)} tokens${saved > 0 ? ` · net saving ~${formatTokens(saved)} tokens` : ''})`
+        : `（携带约 ${formatTokens(sumTok)} tokens${saved > 0 ? ` · 预计净省 ≈ ${formatTokens(saved)} tokens` : ''}）`)
+    : (isEn
+        ? '(Supports AI extraction or manual summary input)'
+        : '（支持 AI 自动提炼或手动输入背景摘要）');
 
   const modeHint = plan.incremental
-    ? `增量合并模式：将在既有摘要基础上并入新增的 <b>${plan.deltaMsgs.length}</b> 条消息`
-    : `全量提炼模式：将压缩最早的 <b>${plan.compressCount}</b> 条消息（原约 <b>${formatTokens(plan.originalTokens)}</b> tokens）`;
+    ? (isEn
+        ? `Incremental merge mode: merging <b>${plan.deltaMsgs.length}</b> new messages into existing summary`
+        : `增量合并模式：将在既有摘要基础上并入新增的 <b>${plan.deltaMsgs.length}</b> 条消息`)
+    : (isEn
+        ? `Full compression mode: compressing earliest <b>${plan.compressCount}</b> messages (~<b>${formatTokens(plan.originalTokens)}</b> tokens)`
+        : `全量提炼模式：将压缩最早的 <b>${plan.compressCount}</b> 条消息（原约 <b>${formatTokens(plan.originalTokens)}</b> tokens）`);
   els.cp_stats.innerHTML = plan.validAll.length
-    ? `当前对话共 <b>${plan.validAll.length}</b> 条有效消息 · 待压缩归档 <b>${plan.compressCount}</b> 条 · 保留近期原文 <b>${plan.kept.length}</b> 条<br><span class="dim">${modeHint}；原始消息仅折叠归档，随时可展开查阅或一键撤销恢复。</span>`
+    ? (isEn
+        ? `Total <b>${plan.validAll.length}</b> active messages · Archiving <b>${plan.compressCount}</b> turns · Retaining <b>${plan.kept.length}</b> recent turns<br><span class="dim">${modeHint}; original messages are folded and can be restored at any time.</span>`
+        : `当前对话共 <b>${plan.validAll.length}</b> 条有效消息 · 待压缩归档 <b>${plan.compressCount}</b> 条 · 保留近期原文 <b>${plan.kept.length}</b> 条<br><span class="dim">${modeHint}；原始消息仅折叠归档，随时可展开查阅或一键撤销恢复。</span>`)
     : (conv.compaction?.summary
-      ? `当前为携带前序摘要的对话（摘要约 <b>${formatTokens(sumTok)}</b> tokens）· 尚未发送新消息，可直接编辑下方背景摘要。`
-      : `当前对话暂无消息 · 你也可以直接在下方预先输入长背景摘要作为前置上下文。`);
+      ? (isEn
+          ? `Carrying prior summary (~<b>${formatTokens(sumTok)}</b> tokens) · No new messages yet, feel free to edit background summary below.`
+          : `当前为携带前序摘要的对话（摘要约 <b>${formatTokens(sumTok)}</b> tokens）· 尚未发送新消息，可直接编辑下方背景摘要。`)
+      : (isEn
+          ? `No messages in chat yet · You can also enter a background summary below in advance.`
+          : `当前对话暂无消息 · 你也可以直接在下方预先输入长背景摘要作为前置上下文。`));
 
   els.cp_revoke.hidden = !conv.compaction?.summary;
   els.cp_apply.disabled = !!state.compacting || !draftSummary;
@@ -1732,7 +1825,7 @@ function updateSummaryButtons() {
   const busy = !!state.compacting;
   for (const id of ['sm_copy', 'sm_export', 'sm_toCompact', 'sm_fork']) els[id].disabled = !hasText || busy;
   els.sm_toggleEdit.disabled = busy;
-  els.sm_toggleEdit.innerHTML = state.summaryEditing ? `${icon('eye')}预览渲染` : `${icon('edit')}编辑 Markdown`;
+  els.sm_toggleEdit.innerHTML = state.summaryEditing ? `${icon('eye')}${t('btnTogglePreview')}` : `${icon('edit')}${t('btnToggleEdit')}`;
 }
 
 function renderSummaryTab() {
@@ -1746,7 +1839,7 @@ function renderSummaryTab() {
     els.sm_view.innerHTML = renderMarkdown(text);
     els.sm_view.classList.remove('empty');
   } else {
-    els.sm_view.textContent = '尚未生成对话总结。选择上方模板风格后，点击「AI 生成对话总结」即可提炼完整纪要，也可直接点击「编辑 Markdown」手写总结。';
+    els.sm_view.textContent = t('smEmptyHint');
     els.sm_view.classList.add('empty');
   }
   els.sm_view.hidden = state.summaryEditing;
@@ -1764,11 +1857,18 @@ async function runSummaryAI() {
   const carrySummary = (!conv.compaction?.upToMsgId && conv.compaction?.summary?.trim()) ? conv.compaction.summary.trim() : '';
   if (!msgs.length && !carrySummary) { toast('当前对话暂无可总结的消息'); return; }
 
-  const styleCfg = SUMMARY_PROMPTS[state.summaryStyle] || SUMMARY_PROMPTS.structured;
+  const lang = getLang();
+  const isEn = lang === 'en';
+  const table = SUMMARY_PROMPTS_I18N[lang] || SUMMARY_PROMPTS_I18N['zh-CN'];
+  const styleCfg = table[state.summaryStyle] || table.structured;
   const wantTitle = els.sm_autoTitle.checked;
-  const sys = '你是一名专业的对话分析与知识整理助手。请严格忠于对话事实进行总结，切勿编造未提及的内容。\n' +
-    styleCfg.prompt +
-    (wantTitle ? '\n\n额外要求：请在回复的第一行严格按此格式输出一个精炼准确的对话标题（18 字以内，不要加引号或书名号）：\n<!-- title: 这里填写标题 -->\n从第二行起直接输出 Markdown 总结正文。' : '');
+  const sys = isEn
+    ? 'You are a professional conversation analyst and knowledge curator. Strictly summarize based on conversation facts, never fabricate information not mentioned.\n' +
+      styleCfg.prompt +
+      (wantTitle ? '\n\nExtra Requirement: Output a concise and accurate conversation title on the first line strictly in this format (under 18 chars/words, no quotes):\n<!-- title: Put title here -->\nDirectly output Markdown summary body from line 2.' : '')
+    : '你是一名专业的对话分析与知识整理助手。请严格忠于对话事实进行总结，切勿编造未提及的内容。\n' +
+      styleCfg.prompt +
+      (wantTitle ? '\n\n额外要求：请在回复的第一行严格按此格式输出一个精炼准确的对话标题（18 字以内，不要加引号或书名号）：\n<!-- title: 这里填写标题 -->\n从第二行起直接输出 Markdown 总结正文。' : '');
 
   const parts = [];
   if (carrySummary) parts.push(`<prior_summary>\n${carrySummary}\n</prior_summary>`);
@@ -1891,7 +1991,10 @@ async function forkWithSummary() {
   nc.model = conv.model;
   nc.systemPrompt = conv.systemPrompt;
   nc.params = clone(conv.params);
-  nc.title = (conv.title && conv.title !== '新对话' ? `${conv.title.replace(/（续）$/, '')}（续）` : '续接对话').slice(0, 36);
+  const isDefaultTitle = !conv.title || conv.title === '新对话' || conv.title === 'New Chat';
+  nc.title = isDefaultTitle
+    ? (getLang() === 'en' ? 'Continued Chat' : '续接对话')
+    : `${conv.title.replace(/（续）$|\s*\(cont\.\)$/i, '')}${getLang() === 'en' ? ' (cont.)' : '（续）'}`.slice(0, 36);
   nc.compaction = {
     id: uid(),
     upToMsgId: null,
@@ -1936,6 +2039,72 @@ function autosize() {
   const ta = els.input;
   ta.style.height = 'auto';
   ta.style.height = Math.min(ta.scrollHeight, innerHeight * 0.4) + 'px';
+}
+
+
+// ======================= 国际化 / i18n =======================
+function applyLanguage(langPref) {
+  const resolved = setLang(langPref);
+  if (state?.settings) state.settings.language = langPref;
+  saveSettings();
+
+  if (els.btnLang) {
+    els.btnLang.textContent = resolved === 'en' ? '中' : 'EN';
+    els.btnLang.title = resolved === 'en' ? 'Switch to Chinese / 切换中文' : 'Switch to English / 切换英文';
+    els.btnLang.setAttribute('aria-label', els.btnLang.title);
+  }
+  if (els.set_language) {
+    els.set_language.value = langPref;
+  }
+
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    const key = el.dataset.i18n;
+    if (key) {
+      const val = t(key);
+      if (typeof val === 'string') el.textContent = val;
+    }
+  });
+  document.querySelectorAll('[data-i18n-html]').forEach((el) => {
+    const key = el.dataset.i18nHtml;
+    if (key) {
+      const val = t(key);
+      if (typeof val === 'string') el.innerHTML = val;
+    }
+  });
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+    const key = el.dataset.i18nPlaceholder;
+    if (key) {
+      const val = t(key);
+      if (typeof val === 'string') el.placeholder = val;
+    }
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+    const key = el.dataset.i18nTitle;
+    if (key) {
+      const val = t(key);
+      if (typeof val === 'string') el.title = val;
+    }
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach((el) => {
+    const key = el.dataset.i18nAria;
+    if (key) {
+      const val = t(key);
+      if (typeof val === 'string') el.setAttribute('aria-label', val);
+    }
+  });
+
+  buildParamList();
+  renderPresetSelect();
+  renderProviders();
+  renderConvList();
+  renderHeader();
+  updateMeter();
+  updateSendBtn();
+  updatePlaceholder();
+  if (els.dlgCompact?.open) {
+    updateCompactPreview();
+    renderSummaryTab();
+  }
 }
 
 // ======================= 事件绑定 =======================
@@ -2139,7 +2308,20 @@ function bindEvents() {
     maskKeyInput();
     renderProviders();
   });
-  els.presetSelect.append(...PRESETS.map((p, i) => { const o = document.createElement('option'); o.value = i; o.textContent = p.name; return o; }));
+  renderPresetSelect();
+  if (els.btnLang) {
+    els.btnLang.addEventListener('click', () => {
+      const current = getLang();
+      const next = current === 'en' ? 'zh-CN' : 'en';
+      applyLanguage(next);
+      toast(next === 'en' ? 'Language switched to English' : '已切换为简体中文');
+    });
+  }
+  if (els.set_language) {
+    els.set_language.addEventListener('change', () => {
+      applyLanguage(els.set_language.value);
+    });
+  }
   els.presetSelect.addEventListener('change', () => {
     if (els.presetSelect.value !== '') addProviderFromPreset(Number(els.presetSelect.value));
     els.presetSelect.value = '';
@@ -2393,16 +2575,23 @@ function bindEvents() {
 }
 
 function updatePlaceholder() {
+  const isEn = getLang() === 'en';
   els.input.placeholder = state.settings.sendKey === 'ctrlEnter'
-    ? '输入消息，Ctrl+Enter 发送，Enter 换行（可粘贴/拖入图片或文件）'
-    : '输入消息，Enter 发送，Shift+Enter 换行（可粘贴/拖入图片或文件）';
+    ? (isEn
+        ? 'Type a message, Ctrl+Enter to send, Enter for new line (paste/drop images or files)'
+        : '输入消息，Ctrl+Enter 发送，Enter 换行（可粘贴/拖入图片或文件）')
+    : (isEn
+        ? 'Type a message, Enter to send, Shift+Enter for new line (paste/drop images or files)'
+        : '输入消息，Enter 发送，Shift+Enter 换行（可粘贴/拖入图片或文件）');
 }
 
 // ======================= 启动 =======================
 async function init() {
   hydrateIcons();
   applyTheme();
+  applyLanguage(state.settings.language || 'auto');
   await detectLocalProxy();
+  renderPresetSelect();
   buildParamList();
   bindEvents();
   updatePlaceholder();

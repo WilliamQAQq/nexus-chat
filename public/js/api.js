@@ -5,22 +5,31 @@ export const PROVIDER_TYPES = {
   gemini: 'Google Gemini',
 };
 
+export const PROVIDER_TYPES_EN = {
+  openai: 'OpenAI Compatible API',
+  anthropic: 'Anthropic (Claude)',
+  gemini: 'Google Gemini',
+};
+
+export const getProviderTypeName = (type, lang = 'zh-CN') =>
+  (lang === 'en' ? PROVIDER_TYPES_EN[type] : PROVIDER_TYPES[type]) || type;
+
 export const PRESETS = [
-  { name: 'OpenAI', type: 'openai', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'o4-mini'] },
-  { name: 'Anthropic Claude', type: 'anthropic', baseUrl: 'https://api.anthropic.com', models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'] },
-  { name: 'Google Gemini', type: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', models: ['gemini-2.5-flash', 'gemini-2.5-pro'] },
-  { name: 'DeepSeek', type: 'openai', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
-  { name: 'OpenRouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
-  { name: '硅基流动 SiliconFlow', type: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1'] },
-  { name: '阿里云百炼 (通义千问)', type: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo'] },
-  { name: '火山方舟 (豆包 / DeepSeek)', type: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: [] },
-  { name: 'Moonshot (Kimi)', type: 'openai', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-0711-preview', 'moonshot-v1-128k'] },
-  { name: '智谱 GLM', type: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash'] },
-  { name: 'Groq', type: 'openai', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile'] },
-  { name: 'Mistral AI', type: 'openai', baseUrl: 'https://api.mistral.ai/v1', models: ['mistral-large-latest', 'codestral-latest'] },
-  { name: 'xAI Grok', type: 'openai', baseUrl: 'https://api.x.ai/v1', models: ['grok-3', 'grok-3-mini'] },
-  { name: 'Ollama (本地)', type: 'openai', baseUrl: 'http://localhost:11434/v1', models: [], apiKey: 'ollama' },
-  { name: '自定义 (OpenAI 兼容 / 中转站)', type: 'openai', baseUrl: '', models: [] },
+  { name: 'OpenAI', enName: 'OpenAI', type: 'openai', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'o4-mini'] },
+  { name: 'Anthropic Claude', enName: 'Anthropic Claude', type: 'anthropic', baseUrl: 'https://api.anthropic.com', models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'] },
+  { name: 'Google Gemini', enName: 'Google Gemini', type: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', models: ['gemini-2.5-flash', 'gemini-2.5-pro'] },
+  { name: 'DeepSeek', enName: 'DeepSeek', type: 'openai', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
+  { name: 'OpenRouter', enName: 'OpenRouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
+  { name: '硅基流动 SiliconFlow', enName: 'SiliconFlow', type: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1'] },
+  { name: '阿里云百炼 (通义千问)', enName: 'Alibaba Cloud (Qwen)', type: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo'] },
+  { name: '火山方舟 (豆包 / DeepSeek)', enName: 'Volcengine Ark (Doubao / DeepSeek)', type: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: [] },
+  { name: 'Moonshot (Kimi)', enName: 'Moonshot (Kimi)', type: 'openai', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-0711-preview', 'moonshot-v1-128k'] },
+  { name: '智谱 GLM', enName: 'Zhipu GLM', type: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash'] },
+  { name: 'Groq', enName: 'Groq', type: 'openai', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile'] },
+  { name: 'Mistral AI', enName: 'Mistral AI', type: 'openai', baseUrl: 'https://api.mistral.ai/v1', models: ['mistral-large-latest', 'codestral-latest'] },
+  { name: 'xAI Grok', enName: 'xAI Grok', type: 'openai', baseUrl: 'https://api.x.ai/v1', models: ['grok-3', 'grok-3-mini'] },
+  { name: 'Ollama (本地)', enName: 'Ollama (Local)', type: 'openai', baseUrl: 'http://localhost:11434/v1', models: [], apiKey: 'ollama' },
+  { name: '自定义 (OpenAI 兼容 / 中转站)', enName: 'Custom (OpenAI Compatible / Proxy)', type: 'openai', baseUrl: '', models: [] },
 ];
 
 const trimBase = (u) => (u || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim().replace(/\/+$/, '');
