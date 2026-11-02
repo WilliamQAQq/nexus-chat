@@ -1,3 +1,17 @@
+import {
+  base64ToUtf8, utf8ToBase64, extractPngTextChunks, embedCharaInPng,
+  parseCharacterCardJson, parseCharacterCardFile, exportCharacterCardV2,
+  expandCharacterMacros, buildCharacterPrompt
+} from './character.js';
+import {
+  normalizeLorebookEntry, parseLorebookJson, exportLorebookJson,
+  isLoreEntryTriggered, scanLorebooks
+} from './lorebook.js';
+import {
+  PLACEMENT, PLACEMENT_LABELS, DEFAULT_REGEX_SCRIPTS,
+  compileRegex, applyRegexScripts, testRegexScript, normalizeRegexScript,
+  parseRegexScriptsJson, exportRegexScriptsJson
+} from './regex.js';
 import { renderMarkdown } from './markdown.js';
 import { estimateTokens, messageTokens, formatTokens, guessContextWindow, IMAGE_TOKENS } from './tokens.js';
 import { sendChat, listModels, PRESETS, PROVIDER_TYPES, getProviderTypeName, resolveEndpointPreview, detectLocalProxy, hasLocalProxy } from './api.js';
@@ -34,8 +48,13 @@ const ICONS = {
   eyeOff: '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>',
   compress: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>',
   sparkle: '<path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/>',
+  user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1 4-10z"/>',
+  code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
+const escapeHtml = (s = '') => String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+
 function hydrateIcons(root = document) {
   root.querySelectorAll('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
 }
@@ -153,6 +172,9 @@ function loadSettings() {
     ...s,
     prompts: s.prompts ?? DEFAULT_PROMPTS,
     defaultParams: mergeParams(s.defaultParams),
+    regexScripts: Array.isArray(s.regexScripts) ? s.regexScripts.map(normalizeRegexScript) : clone(DEFAULT_REGEX_SCRIPTS),
+    userName: s.userName || '',
+    userGender: s.userGender || '',
   };
   setLang(out.language);
   if (out.ephemeralKeys) {
@@ -167,6 +189,8 @@ function loadSettings() {
 const state = {
   settings: loadSettings(),
   convs: [],
+  characters: [],
+  lorebooks: [],
   currentId: null,
   draft: null,          // 尚未发送消息的新对话
   generating: null,     // { convId, msgId, controller }
@@ -177,6 +201,10 @@ const state = {
   editingProviderId: null,
   editingPromptId: null,
   editingMsgId: null,
+  editingCharId: null,
+  editingLorebookId: null,
+  editingLoreEntryId: null,
+  editingRegexId: null,
   stick: true,
 };
 
@@ -324,10 +352,46 @@ function getCompactionSplit(conv) {
   return { comp, upToIdx, archived, active };
 }
 
+function getActiveLorebooks(conv, charObj) {
+  const list = (state.lorebooks || []).filter((b) => b.enabled !== false);
+  if (charObj?.character_book && Array.isArray(charObj.character_book.entries)) {
+    list.push(charObj.character_book);
+  }
+  return list;
+}
+
+function resolveSystemAndPersona(conv, draftText = '') {
+  const charObj = conv?.characterId ? state.characters.find((c) => c.id === conv.characterId) : null;
+  const charPrompt = charObj ? buildCharacterPrompt(charObj, {
+    userName: state.settings.userName || (getLang() === 'en' ? 'User' : '你'),
+    userGender: state.settings.userGender || '',
+    model: conv?.model || '',
+  }) : '';
+  const baseSys = expandPrompt(conv?.systemPrompt || '', conv?.model || '');
+  const activeLore = getActiveLorebooks(conv, charObj);
+  const loreRes = scanLorebooks(activeLore, {
+    messages: conv?.messages || [],
+    draftText,
+    scanDepth: 4,
+    charName: charObj?.name || '',
+    userName: state.settings.userName || '',
+  });
+  const fullSystemText = [
+    loreRes?.byPosition?.before_sys,
+    baseSys,
+    loreRes?.byPosition?.after_sys,
+    loreRes?.byPosition?.before_char,
+    charPrompt,
+    loreRes?.byPosition?.after_char,
+  ].filter(Boolean).join('\n\n');
+  return { charObj, charPrompt, baseSys, loreRes, fullSystemText };
+}
+
 function computeContext(conv, draftText = '', draftImages = 0) {
   const p = conv.params;
   const limit = Math.max(512, Number(p.contextWindow) || 128000);
-  const resolvedSys = expandPrompt(conv.systemPrompt, conv.model);
+  const { fullSystemText } = resolveSystemAndPersona(conv, draftText);
+  const resolvedSys = fullSystemText;
   const sys = resolvedSys.trim() ? estimateTokens(resolvedSys) + 4 : 0;
   const reserve = p.enabled.max_tokens ? p.max_tokens : 0;
   const input = draftText || draftImages ? estimateTokens(draftText) + 4 + draftImages * IMAGE_TOKENS : 0;
@@ -550,6 +614,21 @@ function welcomeEl() {
       b.type = 'button'; b.dataset.act = 'suggest'; b.textContent = txt;
       s.append(b);
     });
+
+    if (state.characters?.length > 0) {
+      const cbar = document.createElement('div');
+      cbar.className = 'char-welcome-bar';
+      cbar.innerHTML = `<span class="label">${t('charWelcomeLabel') || (isEn ? 'Characters:' : '快速开启角色对话：')}</span>`;
+      state.characters.slice(0, 6).forEach((c) => {
+        const cb = document.createElement('button');
+        cb.type = 'button';
+        cb.className = 'char-welcome-chip';
+        cb.innerHTML = `${c.avatar ? `<img src="${escapeHtml(c.avatar)}" alt="" class="chip-avatar">` : '👤'} <span>${escapeHtml(c.name)}</span>`;
+        cb.addEventListener('click', () => startChatWithChar(c.id));
+        cbar.append(cb);
+      });
+      box.append(cbar);
+    }
   }
   return box;
 }
@@ -623,20 +702,27 @@ function messageEl(m, conv, ctx, isArchived = false) {
   el.dataset.id = m.id;
   if (m.error) el.classList.add('error');
   else if (!isArchived && !m.pending && !ctx.includedIds.has(m.id)) el.classList.add('excluded');
-  el.innerHTML = `<div class="avatar">${m.role === 'user' ? t('you') : t('ai')}</div>
+  const charObj = (m.role === 'assistant' && conv.characterId) ? state.characters.find((c) => c.id === conv.characterId) : null;
+  const avatarHtml = m.role === 'user'
+    ? `<div class="avatar">${t('you')}</div>`
+    : (charObj?.avatar
+      ? `<div class="avatar has-img"><img src="${escapeHtml(charObj.avatar)}" alt="${escapeHtml(charObj.name)}"></div>`
+      : `<div class="avatar">${charObj?.name ? escapeHtml(charObj.name.slice(0, 2)) : t('ai')}</div>`);
+  el.innerHTML = `${avatarHtml}
     <div class="msg-body"><div class="msg-meta"></div><div class="msg-content"></div><div class="msg-actions"></div></div>`;
-  fillMeta(el, m, ctx, isArchived);
+  fillMeta(el, m, ctx, isArchived, conv);
   if (state.editingMsgId === m.id) fillEditor(el, m);
   else fillContent(el, m);
   fillActions(el, m, isArchived);
   return el;
 }
 
-function fillMeta(el, m, ctx, isArchived = false) {
+function fillMeta(el, m, ctx, isArchived = false, conv = null) {
   const meta = el.querySelector('.msg-meta');
   meta.innerHTML = '';
   const b = document.createElement('b');
-  b.textContent = m.role === 'user' ? t('you') : (m.model || t('ai'));
+  const charObj = (m.role === 'assistant' && conv?.characterId) ? state.characters.find((c) => c.id === conv.characterId) : null;
+  b.textContent = m.role === 'user' ? t('you') : (charObj?.name || m.model || t('ai'));
   meta.append(b);
   const add = (text, cls = '') => { const s = document.createElement('span'); s.textContent = text; if (cls) s.className = cls; meta.append(s); };
   add(clock(m.time));
@@ -674,7 +760,7 @@ function fillContent(el, m) {
     if (m.content) {
       const t = document.createElement('div');
       t.className = 'user-text';
-      t.textContent = m.content;
+      t.textContent = applyRegexScripts(m.content, state.settings.regexScripts, PLACEMENT.DISPLAY_ONLY);
       c.append(t);
     }
     return;
@@ -704,7 +790,10 @@ function fillContent(el, m) {
       } else {
         md.innerHTML = '<div class="typing"><i></i><i></i><i></i></div>';
       }
-    } else md.innerHTML = renderMarkdown(content) + (m.pending ? '<span class="cursor"></span>' : '');
+    } else {
+      const disp = applyRegexScripts(content, state.settings.regexScripts, PLACEMENT.DISPLAY_ONLY);
+      md.innerHTML = renderMarkdown(disp) + (m.pending ? '<span class="cursor"></span>' : '');
+    }
     if (content || m.pending) c.append(md);
   }
   if (m.error) {
@@ -783,6 +872,83 @@ function syncTempChips(p) {
   updateTopTempPill();
 }
 
+function renderExtensionsPanel() {
+  const conv = currentConv();
+  if (!conv) return;
+  const isEn = getLang() === 'en';
+
+  // --- 角色卡 (Character Card) ---
+  const charId = conv.characterId;
+  const charObj = charId ? state.characters.find((c) => c.id === charId) : null;
+  if (charObj) {
+    if (els.charEmptyHint) els.charEmptyHint.hidden = true;
+    if (els.charBanner) els.charBanner.hidden = false;
+    if (els.charGreetingWrap) els.charGreetingWrap.hidden = false;
+    if (els.charActionBtns) els.charActionBtns.hidden = false;
+
+    if (els.charNameText) els.charNameText.textContent = charObj.name;
+    if (els.charAvatarImg && els.charAvatarFallback) {
+      if (charObj.avatar) {
+        els.charAvatarImg.src = charObj.avatar;
+        els.charAvatarImg.hidden = false;
+        els.charAvatarFallback.hidden = true;
+      } else {
+        els.charAvatarImg.hidden = true;
+        els.charAvatarFallback.hidden = false;
+        els.charAvatarFallback.textContent = charObj.name.slice(0, 1) || '👤';
+      }
+    }
+    if (els.charTagsBox) {
+      els.charTagsBox.innerHTML = (charObj.tags || []).map((t) => `<span class="char-tag">${escapeHtml(t)}</span>`).join('');
+    }
+    if (els.charGreetingSelect) {
+      const greetings = [charObj.first_mes, ...(charObj.alternate_greetings || [])].filter(Boolean);
+      els.charGreetingSelect.innerHTML = greetings.map((g, idx) => {
+        const lbl = idx === 0 ? (isEn ? 'Default Greeting' : '默认开场白') : (isEn ? ('Alt #' + idx) : ('备选 #' + idx));
+        return `<option value="${idx}">${lbl}: ${escapeHtml(g.slice(0, 24))}...</option>`;
+      }).join('');
+      if (conv.greetingIndex != null && greetings[conv.greetingIndex]) {
+        els.charGreetingSelect.value = conv.greetingIndex;
+      }
+    }
+  } else {
+    if (els.charEmptyHint) els.charEmptyHint.hidden = false;
+    if (els.charBanner) els.charBanner.hidden = true;
+    if (els.charGreetingWrap) els.charGreetingWrap.hidden = true;
+    if (els.charActionBtns) els.charActionBtns.hidden = true;
+  }
+
+  // --- 世界书 (World Info) ---
+  const activeLore = getActiveLorebooks(conv, charObj);
+  const draftText = composeText();
+  const scanRes = scanLorebooks(activeLore, {
+    messages: conv?.messages || [],
+    draftText,
+    scanDepth: 4,
+    charName: charObj?.name || '',
+    userName: state.settings.userName || '',
+  });
+  if (els.loreStatusHint) {
+    if (scanRes.activeEntries.length > 0) {
+      els.loreStatusHint.textContent = t('loreActiveStatus', scanRes.activeEntries.length, scanRes.activeTokens);
+    } else {
+      els.loreStatusHint.textContent = t('loreActiveZeroHint');
+    }
+  }
+  if (els.loreActiveChips) {
+    els.loreActiveChips.innerHTML = scanRes.activeEntries.map((e) =>
+      `<span class="lore-chip" title="${escapeHtml(e.bookName || '')}">${escapeHtml(e.name || 'Entry')}</span>`
+    ).join('');
+  }
+
+  // --- 正则脚本 (Regex Scripts) ---
+  const scripts = state.settings.regexScripts || [];
+  const enabledCount = scripts.filter((r) => !r.disabled).length;
+  if (els.regexStatusHint) {
+    els.regexStatusHint.textContent = t('regexEnabledHint', enabledCount, scripts.length);
+  }
+}
+
 function renderPanel() {
   const conv = currentConv();
   if (!conv) return;
@@ -803,6 +969,7 @@ function renderPanel() {
   }
   els.ctxChips.querySelectorAll('button').forEach((b) => b.classList.toggle('active', Number(b.dataset.ctx) === p.contextWindow));
   syncTempChips(p);
+  renderExtensionsPanel();
 }
 
 let meterRaf = 0;
@@ -953,7 +1120,8 @@ function composeText() {
 async function send() {
   if (state.generating || state.compacting) return;
   const conv = currentConv();
-  const content = composeText();
+  const rawContent = composeText();
+  const content = applyRegexScripts(rawContent, state.settings.regexScripts, PLACEMENT.USER_INPUT);
   const images = state.attachments.filter((a) => a.kind === 'image').map((a) => a.data);
   if (!content && !images.length) return;
   ensureTarget(conv);
@@ -999,8 +1167,13 @@ async function generate(conv) {
       }
     }
     const ctx = computeContext(conv);
-    const history = ctx.included;
-    const systemText = expandPrompt(conv.systemPrompt, conv.model);
+    const history = ctx.included.map((m) => {
+      if (m.images?.length || !m.content) return m;
+      const filtered = applyRegexScripts(m.content, state.settings.regexScripts, PLACEMENT.REQUEST_PROMPT);
+      return filtered === m.content ? m : { ...m, content: filtered };
+    });
+    const { fullSystemText } = resolveSystemAndPersona(conv);
+    const systemText = fullSystemText;
     const res = await sendChat({
       provider, model: conv.model, system: systemText, messages: history, params: conv.params, signal: controller.signal,
       onDelta: ({ content, reasoning }) => {
@@ -1011,6 +1184,9 @@ async function generate(conv) {
     });
     if (res?.usage) assistant.usage = res.usage;
     if (res?.finish) assistant.finish = res.finish;
+    if (assistant.content) {
+      assistant.content = applyRegexScripts(assistant.content, state.settings.regexScripts, PLACEMENT.AI_OUTPUT);
+    }
     if (!assistant.content && !assistant.reasoning) assistant.error = 'API 返回了空内容';
   } catch (e) {
     if (e.name === 'AbortError') assistant.stopped = true;
@@ -2015,6 +2191,816 @@ async function forkWithSummary() {
   await saveConvNow(nc);
 }
 
+
+// ======================= 角色卡 (Character Cards - 酒馆同款) =======================
+function openCharacters(charIdToSelect = null) {
+  if (charIdToSelect) state.editingCharId = charIdToSelect;
+  else if (!state.editingCharId && state.characters.length > 0) state.editingCharId = state.characters[0].id;
+  renderCharList();
+  selectChar(state.editingCharId);
+  showModal(els.dlgCharacters);
+}
+
+function renderCharList() {
+  const box = els.charList;
+  if (!box) return;
+  box.replaceChildren();
+  const conv = currentConv();
+  if (!state.characters.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.padding = '24px 12px';
+    empty.textContent = t('noCharCardsInLib') || '暂无角色卡，点击右上角新建或导入';
+    box.append(empty);
+    return;
+  }
+  state.characters.forEach((c) => {
+    const item = document.createElement('div');
+    item.className = 'prov-item' + (c.id === state.editingCharId ? ' active' : '');
+    item.dataset.id = c.id;
+    const isBound = conv?.characterId === c.id;
+    const avatarHtml = c.avatar
+      ? `<img class="char-item-avatar" src="${escapeHtml(c.avatar)}" alt="" loading="lazy">`
+      : `<span class="char-item-fallback">${escapeHtml(c.name.slice(0, 1) || '👤')}</span>`;
+    item.innerHTML = `
+      <div class="char-item-head">
+        ${avatarHtml}
+        <div class="char-item-meta">
+          <div class="name">${escapeHtml(c.name || t('unnamedChar'))} ${isBound ? '<span class="char-bound-tag">' + (t('charBoundTag') || '当前对话') + '</span>' : ''}</div>
+          <div class="sub">${(c.tags || []).slice(0, 3).map((t) => '#' + escapeHtml(t)).join(' ') || (c.description ? escapeHtml(c.description.slice(0, 24)) : '无标签')}</div>
+        </div>
+      </div>`;
+    box.append(item);
+  });
+}
+
+function selectChar(id) {
+  state.editingCharId = id;
+  const c = state.characters.find((x) => x.id === id);
+  const btns = [
+    els.btnCharNewChat, els.btnCharBindCur, els.btnCharSave,
+    els.btnCharExportPng, els.btnCharExportJson, els.btnCharDelete, els.btnChangeAvatar
+  ];
+  if (!c) {
+    btns.forEach((b) => { if (b) b.disabled = true; });
+    if (els.ch_avatarImg) els.ch_avatarImg.hidden = true;
+    if (els.ch_avatarFallback) { els.ch_avatarFallback.hidden = false; els.ch_avatarFallback.textContent = '👤'; }
+    if (els.ch_name) els.ch_name.value = '';
+    if (els.ch_tags) els.ch_tags.value = '';
+    if (els.ch_bookBadge) els.ch_bookBadge.textContent = '';
+    if (els.ch_first_mes) els.ch_first_mes.value = '';
+    if (els.ch_alternate_greetings) els.ch_alternate_greetings.value = '';
+    if (els.ch_description) els.ch_description.value = '';
+    if (els.ch_personality) els.ch_personality.value = '';
+    if (els.ch_scenario) els.ch_scenario.value = '';
+    if (els.ch_mes_example) els.ch_mes_example.value = '';
+    if (els.ch_system_prompt) els.ch_system_prompt.value = '';
+    if (els.ch_post_history_instructions) els.ch_post_history_instructions.value = '';
+    if (els.ch_creator_notes) els.ch_creator_notes.value = '';
+    return;
+  }
+  btns.forEach((b) => { if (b) b.disabled = false; });
+  if (els.ch_avatarImg && els.ch_avatarFallback) {
+    if (c.avatar) {
+      els.ch_avatarImg.src = c.avatar;
+      els.ch_avatarImg.hidden = false;
+      els.ch_avatarFallback.hidden = true;
+    } else {
+      els.ch_avatarImg.hidden = true;
+      els.ch_avatarFallback.hidden = false;
+      els.ch_avatarFallback.textContent = c.name.slice(0, 1) || '👤';
+    }
+  }
+  if (els.ch_name) els.ch_name.value = c.name || '';
+  if (els.ch_tags) els.ch_tags.value = (c.tags || []).join(', ');
+  if (els.ch_bookBadge) {
+    const bookCount = c.character_book?.entries?.length ?? 0;
+    els.ch_bookBadge.textContent = bookCount > 0 ? `已内嵌世界书 (${bookCount} 条)` : '';
+  }
+  if (els.ch_first_mes) els.ch_first_mes.value = c.first_mes || '';
+  if (els.ch_alternate_greetings) els.ch_alternate_greetings.value = (c.alternate_greetings || []).join('\n---\n');
+  if (els.ch_description) els.ch_description.value = c.description || '';
+  if (els.ch_personality) els.ch_personality.value = c.personality || '';
+  if (els.ch_scenario) els.ch_scenario.value = c.scenario || '';
+  if (els.ch_mes_example) els.ch_mes_example.value = c.mes_example || '';
+  if (els.ch_system_prompt) els.ch_system_prompt.value = c.system_prompt || '';
+  if (els.ch_post_history_instructions) els.ch_post_history_instructions.value = c.post_history_instructions || '';
+  if (els.ch_creator_notes) els.ch_creator_notes.value = c.creator_notes || '';
+}
+
+async function newChar() {
+  const isEn = getLang() === 'en';
+  const nc = {
+    id: uid(),
+    name: isEn ? 'New Character' : '新角色',
+    avatar: '',
+    description: '',
+    personality: '',
+    scenario: '',
+    first_mes: isEn ? 'Hello! How can I assist you today?' : '你好！今天想和我聊些什么呢？',
+    mes_example: '',
+    creator_notes: '',
+    system_prompt: '',
+    post_history_instructions: '',
+    tags: [isEn ? 'Companion' : '同伴'],
+    alternate_greetings: [],
+    character_book: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  state.characters.unshift(nc);
+  state.editingCharId = nc.id;
+  await db.put('characters', nc);
+  renderCharList();
+  selectChar(nc.id);
+  if (els.ch_name) { els.ch_name.focus(); els.ch_name.select(); }
+}
+
+async function saveChar() {
+  if (!state.editingCharId) return;
+  const c = state.characters.find((x) => x.id === state.editingCharId);
+  if (!c) return;
+  c.name = els.ch_name.value.trim() || (getLang() === 'en' ? 'Unnamed Character' : '未命名角色');
+  c.tags = els.ch_tags.value.split(/[,，、]+/).map((s) => s.trim()).filter(Boolean);
+  c.first_mes = els.ch_first_mes.value;
+  c.alternate_greetings = els.ch_alternate_greetings.value.split(/\n\s*---\s*\n/).map((s) => s.trim()).filter(Boolean);
+  c.description = els.ch_description.value;
+  c.personality = els.ch_personality.value;
+  c.scenario = els.ch_scenario.value;
+  c.mes_example = els.ch_mes_example.value;
+  c.system_prompt = els.ch_system_prompt.value;
+  c.post_history_instructions = els.ch_post_history_instructions.value;
+  c.creator_notes = els.ch_creator_notes.value;
+  c.updatedAt = Date.now();
+
+  await db.put('characters', c);
+  renderCharList();
+  if (currentConv()?.characterId === c.id) {
+    renderPanel();
+    renderMessages();
+    updateMeter();
+  }
+  toast(t('charSavedSuccess') || '角色卡已保存');
+}
+
+async function deleteChar(id) {
+  if (!id) return;
+  const c = state.characters.find((x) => x.id === id);
+  if (!c || !confirm(t('confirmDeleteChar', c.name) || `确定删除角色「${c.name}」？`)) return;
+  state.characters = state.characters.filter((x) => x.id !== id);
+  await db.del('characters', id);
+  const conv = currentConv();
+  if (conv && conv.characterId === id) {
+    conv.characterId = null;
+    saveConvSoon(conv, 0);
+  }
+  state.editingCharId = state.characters[0]?.id || null;
+  renderCharList();
+  selectChar(state.editingCharId);
+  renderPanel();
+  renderMessages();
+  updateMeter();
+  toast(t('charDeletedToast') || '已删除角色卡');
+}
+
+function changeAvatar(file) {
+  if (!state.editingCharId || !file) return;
+  const c = state.characters.find((x) => x.id === state.editingCharId);
+  if (!c) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    c.avatar = reader.result;
+    if (els.ch_avatarImg && els.ch_avatarFallback) {
+      els.ch_avatarImg.src = c.avatar;
+      els.ch_avatarImg.hidden = false;
+      els.ch_avatarFallback.hidden = true;
+    }
+    await db.put('characters', c);
+    renderCharList();
+    if (currentConv()?.characterId === c.id) {
+      renderPanel();
+      renderMessages();
+    }
+    toast(t('avatarUpdated') || '头像已更新');
+  };
+  reader.readAsDataURL(file);
+}
+
+async function importCharFile(file) {
+  try {
+    const card = await parseCharacterCardFile(file);
+    card.id = uid();
+    card.createdAt = Date.now();
+    card.updatedAt = Date.now();
+
+    // 若角色卡内嵌了世界书，同时保存一份至独立世界书库供复用
+    if (card.character_book && Array.isArray(card.character_book.entries) && card.character_book.entries.length) {
+      const book = {
+        id: uid(),
+        name: card.character_book.name || `${card.name} 的世界书`,
+        description: card.character_book.description || `从角色卡「${card.name}」导入`,
+        scan_depth: card.character_book.scan_depth ?? 4,
+        token_budget: card.character_book.token_budget ?? 2048,
+        recursive_scanning: !!card.character_book.recursive_scanning,
+        enabled: true,
+        entries: card.character_book.entries.map(normalizeLorebookEntry),
+      };
+      state.lorebooks.unshift(book);
+      await db.put('lorebooks', book);
+    }
+
+    state.characters.unshift(card);
+    await db.put('characters', card);
+    state.editingCharId = card.id;
+    renderCharList();
+    selectChar(card.id);
+    toast(t('charImportSuccess', card.name) || `已成功导入角色卡「${card.name}」`);
+  } catch (e) {
+    toast((t('charImportFail') || '导入角色卡失败: ') + e.message, 4000);
+  }
+}
+
+async function exportCharPng(id) {
+  const c = state.characters.find((x) => x.id === id);
+  if (!c) return;
+  let basePng = c.avatar;
+  if (!basePng || !basePng.startsWith('data:image/png')) {
+    // 自动通过 Canvas 生成一张默认的占位立绘 PNG
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createLinearGradient(0, 0, 256, 256);
+    grad.addColorStop(0, '#6366f1'); grad.addColorStop(1, '#a855f7');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 80px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText((c.name || 'C').slice(0, 2), 128, 128);
+    basePng = canvas.toDataURL('image/png');
+  }
+  try {
+    const blob = embedCharaInPng(basePng, c);
+    download(`${c.name || 'character'}.png`, blob, 'image/png');
+    toast(t('exportSuccess') || '导出成功');
+  } catch (e) {
+    toast('导出 PNG 角色卡失败: ' + e.message);
+  }
+}
+
+function exportCharJson(id) {
+  const c = state.characters.find((x) => x.id === id);
+  if (!c) return;
+  const jsonStr = exportCharacterCardV2(c);
+  download(`${c.name || 'character'}.json`, jsonStr, 'application/json');
+  toast(t('exportSuccess') || '导出成功');
+}
+
+function startChatWithChar(id) {
+  const c = state.characters.find((x) => x.id === id);
+  if (!c) return;
+  newChat();
+  const conv = currentConv();
+  conv.characterId = id;
+  conv.title = c.name;
+  if (c.first_mes) {
+    const greeting = expandCharacterMacros(c.first_mes, {
+      charName: c.name,
+      userName: state.settings.userName || (getLang() === 'en' ? 'User' : '你'),
+      model: conv.model,
+    });
+    conv.messages.push({
+      id: uid(),
+      role: 'assistant',
+      content: greeting,
+      time: Date.now(),
+      model: conv.model,
+    });
+  }
+  saveConvSoon(conv, 0);
+  if (els.dlgCharacters?.open) els.dlgCharacters.close();
+  renderAll();
+  toast(t('chatStartedWithChar', c.name) || `已开启与「${c.name}」的专属对话`);
+}
+
+function bindCharToConv(id) {
+  const c = state.characters.find((x) => x.id === id);
+  const conv = currentConv();
+  if (!conv || !c) return;
+  conv.characterId = id;
+  saveConvSoon(conv, 0);
+  if (els.dlgCharacters?.open) els.dlgCharacters.close();
+  renderPanel();
+  renderMessages();
+  updateMeter();
+  toast(t('charBoundSuccess') || `已将当前对话绑定至「${c.name}」`);
+}
+
+function unbindCharFromConv() {
+  const conv = currentConv();
+  if (!conv) return;
+  conv.characterId = null;
+  saveConvSoon(conv, 0);
+  renderPanel();
+  renderMessages();
+  updateMeter();
+  toast(t('charUnboundSuccess') || '已解除角色绑定');
+}
+
+function onGreetingChange(idx) {
+  const conv = currentConv();
+  if (!conv || !conv.characterId) return;
+  const c = state.characters.find((x) => x.id === conv.characterId);
+  if (!c) return;
+  const greetings = [c.first_mes, ...(c.alternate_greetings || [])].filter(Boolean);
+  const greeting = greetings[idx];
+  if (!greeting) return;
+  conv.greetingIndex = idx;
+  // 若第一条消息为 assistant 欢迎语且尚未继续深度交谈，自动无缝替换为新选择的开场白
+  if (conv.messages.length === 1 && conv.messages[0].role === 'assistant') {
+    conv.messages[0].content = expandCharacterMacros(greeting, {
+      charName: c.name,
+      userName: state.settings.userName || (getLang() === 'en' ? 'User' : '你'),
+      model: conv.model,
+    });
+  }
+  saveConvSoon(conv, 0);
+  renderMessages();
+  updateMeter();
+  toast(t('greetingSwitched') || '已切换开场白');
+}
+
+
+// ======================= 世界书 (World Info / Lorebooks) =======================
+function openLorebooks(bookIdToSelect = null) {
+  if (state.lorebooks.length === 0) {
+    const isEn = getLang() === 'en';
+    const nb = {
+      id: uid(),
+      name: isEn ? 'Default World Info' : '通用世界观',
+      description: isEn ? 'World rules, background lore, and glossary' : '世界观设定、背景知识与专有名词词库',
+      scan_depth: 4,
+      token_budget: 2048,
+      recursive_scanning: false,
+      enabled: true,
+      entries: [
+        normalizeLorebookEntry({
+          keys: [isEn ? 'Nexus' : '枢纽', 'Nexus'],
+          comment: isEn ? 'Nexus Chat Concept' : 'Nexus 概念',
+          content: isEn ? 'Nexus is an advanced AI chat workbench featuring contextual token budgeting, world info, regex automation, and character cards.' : 'Nexus 是一个支持上下文窗口额度提示、提示词编辑、世界书、正则脚本与酒馆角色卡的高级 AI 对话工作台。',
+          position: 'before_sys',
+          order: 100,
+          enabled: true,
+        })
+      ],
+    };
+    state.lorebooks.push(nb);
+    db.put('lorebooks', nb);
+  }
+  if (bookIdToSelect) state.editingLorebookId = bookIdToSelect;
+  else if (!state.editingLorebookId && state.lorebooks.length > 0) state.editingLorebookId = state.lorebooks[0].id;
+  renderLorebookSelect();
+  renderLoreEntryList();
+  showModal(els.dlgLorebooks);
+}
+
+function renderLorebookSelect() {
+  const sel = els.selLorebook;
+  if (!sel) return;
+  sel.innerHTML = state.lorebooks.map((b) =>
+    `<option value="${b.id}"${b.id === state.editingLorebookId ? ' selected' : ''}>${escapeHtml(b.name)} (${b.entries?.length ?? 0} 条)</option>`
+  ).join('');
+}
+
+function renderLoreEntryList() {
+  const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+  const box = els.loreEntryList;
+  if (!box) return;
+  box.replaceChildren();
+
+  if (els.lb_name) els.lb_name.value = b?.name || '';
+  if (els.lb_scanDepth) els.lb_scanDepth.value = b?.scan_depth ?? 4;
+
+  if (!b || !b.entries?.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.padding = '24px 12px';
+    empty.textContent = t('noLoreEntriesInBook') || '该世界书暂无词条，点击新建词条添加';
+    box.append(empty);
+    selectLoreEntry(null);
+    return;
+  }
+  if (!state.editingLoreEntryId || !b.entries.some((e) => e.id === state.editingLoreEntryId)) {
+    state.editingLoreEntryId = b.entries[0].id;
+  }
+  b.entries.forEach((e) => {
+    const item = document.createElement('div');
+    item.className = 'lore-entry-item' + (e.id === state.editingLoreEntryId ? ' active' : '');
+    item.dataset.id = e.id;
+    const isEn = getLang() === 'en';
+    const posLabel = e.position === 'after_sys' ? (isEn ? 'After Sys' : '系统词后')
+      : e.position === 'before_char' ? (isEn ? 'Before Char' : '角色前')
+      : e.position === 'after_char' ? (isEn ? 'After Char' : '角色后')
+      : (isEn ? 'Before Sys' : '系统词前');
+
+    item.innerHTML = `
+      <div class="lore-entry-row">
+        <label class="lore-chk-label" title="${isEn ? 'Toggle entry' : '启用/禁用词条'}">
+          <input type="checkbox" data-lore-toggle ${e.enabled !== false ? 'checked' : ''}>
+        </label>
+        <span class="lore-entry-name">${escapeHtml(e.name || e.comment || e.keys[0] || 'Entry')}</span>
+        <span class="lore-pos-badge">${posLabel}</span>
+      </div>
+      <div class="lore-entry-keys">${(e.keys || []).map((k) => '<span class="lore-key-tag">' + escapeHtml(k) + '</span>').join('')}</div>`;
+    box.append(item);
+  });
+  selectLoreEntry(state.editingLoreEntryId);
+}
+
+function selectLoreEntry(entryId) {
+  state.editingLoreEntryId = entryId;
+  const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+  const e = b?.entries?.find((x) => x.id === entryId);
+  if (!e) {
+    if (els.btnDeleteLoreEntry) els.btnDeleteLoreEntry.disabled = true;
+    if (els.btnSaveLoreEntry) els.btnSaveLoreEntry.disabled = true;
+    if (els.le_name) els.le_name.value = '';
+    if (els.le_position) els.le_position.value = 'before_sys';
+    if (els.le_keys) els.le_keys.value = '';
+    if (els.le_secKeys) els.le_secKeys.value = '';
+    if (els.le_enabled) els.le_enabled.checked = true;
+    if (els.le_constant) els.le_constant.checked = false;
+    if (els.le_selective) els.le_selective.checked = false;
+    if (els.le_order) els.le_order.value = '100';
+    if (els.le_content) els.le_content.value = '';
+    return;
+  }
+  if (els.btnDeleteLoreEntry) els.btnDeleteLoreEntry.disabled = false;
+  if (els.btnSaveLoreEntry) els.btnSaveLoreEntry.disabled = false;
+  if (els.le_name) els.le_name.value = e.name || e.comment || '';
+  if (els.le_position) els.le_position.value = e.position || 'before_sys';
+  if (els.le_keys) els.le_keys.value = (e.keys || []).join(', ');
+  if (els.le_secKeys) els.le_secKeys.value = (e.secondary_keys || []).join(', ');
+  if (els.le_enabled) els.le_enabled.checked = e.enabled !== false;
+  if (els.le_constant) els.le_constant.checked = !!e.constant;
+  if (els.le_selective) els.le_selective.checked = !!e.selective;
+  if (els.le_order) els.le_order.value = e.order ?? 100;
+  if (els.le_content) els.le_content.value = e.content || '';
+}
+
+async function newLoreEntry() {
+  const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+  if (!b) return;
+  const isEn = getLang() === 'en';
+  const nameVal = isEn ? 'New Entry' : '新词条';
+  const ne = normalizeLorebookEntry({
+    id: uid(),
+    name: nameVal,
+    keys: [isEn ? 'Keyword' : '关键词'],
+    secondary_keys: [],
+    comment: nameVal,
+    content: '',
+    constant: false,
+    selective: false,
+    position: 'before_sys',
+    order: 100,
+    enabled: true,
+  });
+  b.entries.push(ne);
+  state.editingLoreEntryId = ne.id;
+  await db.put('lorebooks', b);
+  renderLoreEntryList();
+  selectLoreEntry(ne.id);
+  if (els.le_name) { els.le_name.focus(); els.le_name.select(); }
+}
+
+async function saveLoreEntry() {
+  const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+  const e = b?.entries?.find((x) => x.id === state.editingLoreEntryId);
+  if (!b || !e) return;
+  const nameVal = els.le_name.value.trim() || (getLang() === 'en' ? 'Unnamed Entry' : '未命名词条');
+  e.name = nameVal;
+  e.comment = nameVal;
+  e.position = els.le_position.value;
+  e.keys = els.le_keys.value.split(/[,，、]+/).map((s) => s.trim()).filter(Boolean);
+  e.secondary_keys = els.le_secKeys.value.split(/[,，、]+/).map((s) => s.trim()).filter(Boolean);
+  e.enabled = els.le_enabled.checked;
+  e.constant = els.le_constant.checked;
+  e.selective = els.le_selective.checked;
+  e.order = Number(els.le_order.value) || 100;
+  e.content = els.le_content.value;
+
+  await db.put('lorebooks', b);
+  renderLoreEntryList();
+  renderPanel();
+  updateMeter();
+  toast(t('loreEntrySaved') || '词条已保存');
+}
+
+async function deleteLoreEntry(entryId) {
+  const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+  if (!b || !entryId) return;
+  b.entries = b.entries.filter((x) => x.id !== entryId);
+  await db.put('lorebooks', b);
+  state.editingLoreEntryId = b.entries[0]?.id || null;
+  renderLoreEntryList();
+  selectLoreEntry(state.editingLoreEntryId);
+  renderPanel();
+  updateMeter();
+  toast(t('loreEntryDeleted') || '已删除词条');
+}
+
+async function newLorebook() {
+  const isEn = getLang() === 'en';
+  const name = prompt(t('newLorebookPromptTitle') || '请输入世界书名称：', isEn ? 'New World Info' : '新世界书');
+  if (!name || !name.trim()) return;
+  const book = {
+    id: uid(),
+    name: name.trim(),
+    description: '',
+    scan_depth: 4,
+    token_budget: 2048,
+    recursive_scanning: false,
+    enabled: true,
+    entries: [],
+  };
+  state.lorebooks.push(book);
+  state.editingLorebookId = book.id;
+  await db.put('lorebooks', book);
+  renderLorebookSelect();
+  renderLoreEntryList();
+  toast(t('lorebookCreated') || '已新建世界书');
+}
+
+async function deleteLorebook(id) {
+  if (!id) return;
+  const b = state.lorebooks.find((x) => x.id === id);
+  if (!b || !confirm(t('confirmDeleteLorebook', b.name) || `确定删除世界书「${b.name}」？`)) return;
+  state.lorebooks = state.lorebooks.filter((x) => x.id !== id);
+  await db.del('lorebooks', id);
+  state.editingLorebookId = state.lorebooks[0]?.id || null;
+  renderLorebookSelect();
+  renderLoreEntryList();
+  renderPanel();
+  updateMeter();
+  toast(t('lorebookDeleted') || '已删除世界书');
+}
+
+async function importLorebookFile(file) {
+  try {
+    const text = await file.text();
+    const book = parseLorebookJson(text, file.name);
+    book.id = uid();
+    state.lorebooks.unshift(book);
+    await db.put('lorebooks', book);
+    state.editingLorebookId = book.id;
+    renderLorebookSelect();
+    renderLoreEntryList();
+    renderPanel();
+    updateMeter();
+    toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」`);
+  } catch (e) {
+    toast((t('loreImportFail') || '导入世界书失败: ') + e.message, 4000);
+  }
+}
+
+function exportLorebookFile(id) {
+  const b = state.lorebooks.find((x) => x.id === id);
+  if (!b) return;
+  const jsonStr = exportLorebookJson(b);
+  download(`${b.name || 'lorebook'}.json`, jsonStr, 'application/json');
+  toast(t('exportSuccess') || '导出成功');
+}
+
+function runLoreTester() {
+  const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+  const input = els.loreTestInput?.value || '';
+  const resultsBox = els.loreTestResults;
+  if (!resultsBox) return;
+  if (!b || !input.trim()) {
+    resultsBox.innerHTML = '<span class="dim">' + (t('loreTestEmptyHint') || '输入测试文本以预览匹配的词条…') + '</span>';
+    return;
+  }
+  const scanRes = scanLorebooks([b], {
+    messages: [],
+    draftText: input,
+    scanDepth: 1,
+  });
+  if (scanRes.activeEntries.length === 0) {
+    resultsBox.innerHTML = '<span class="dim">' + (t('loreTestNoMatch') || '未触发任何词条') + '</span>';
+    return;
+  }
+  resultsBox.innerHTML = `
+    <div class="lore-test-matched">
+      <b>${t('loreTestMatchedCount', scanRes.activeEntries.length, scanRes.activeTokens) || `命中 ${scanRes.activeEntries.length} 条 (约 ${scanRes.activeTokens} tokens)`}:</b>
+      <div class="lore-active-chips" style="margin-top:6px">
+        ${scanRes.activeEntries.map((e) => `<span class="lore-chip">${escapeHtml(e.name || 'Entry')}</span>`).join('')}
+      </div>
+    </div>`;
+}
+
+
+// ======================= 正则脚本 (Regex Scripts - SillyTavern 兼容) =======================
+function openRegex(regexIdToSelect = null) {
+  if (regexIdToSelect) state.editingRegexId = regexIdToSelect;
+  else if (!state.editingRegexId && state.settings.regexScripts.length > 0) state.editingRegexId = state.settings.regexScripts[0].id;
+  renderRegexList();
+  selectRegex(state.editingRegexId);
+  showModal(els.dlgRegex);
+}
+
+function renderRegexList() {
+  const box = els.regexList;
+  if (!box) return;
+  box.replaceChildren();
+  const scripts = state.settings.regexScripts || [];
+  if (!scripts.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.padding = '24px 12px';
+    empty.textContent = t('noRegexInList') || '暂无正则规则，可点击右上角新建或加载常用预设';
+    box.append(empty);
+    selectRegex(null);
+    return;
+  }
+  scripts.forEach((r) => {
+    const item = document.createElement('div');
+    item.className = 'regex-rule-item' + (r.id === state.editingRegexId ? ' active' : '');
+    item.dataset.id = r.id;
+    const isEn = getLang() === 'en';
+    const tagMap = {
+      [PLACEMENT.USER_INPUT]: 'User',
+      [PLACEMENT.AI_OUTPUT]: 'AI',
+      [PLACEMENT.DISPLAY_ONLY]: isEn ? 'Display' : '渲染',
+      [PLACEMENT.REQUEST_PROMPT]: 'Prompt',
+      [PLACEMENT.WORLD_INFO]: isEn ? 'World' : '世界书',
+    };
+    const tagsHtml = (r.placement || []).map((p) => `<span class="regex-tag">${tagMap[p] || p}</span>`).join('');
+
+    item.innerHTML = `
+      <div class="regex-item-head">
+        <label class="lore-chk-label" title="${isEn ? 'Toggle rule' : '启用/禁用规则'}">
+          <input type="checkbox" data-rx-toggle ${!r.disabled ? 'checked' : ''}>
+        </label>
+        <span class="regex-item-name">${escapeHtml(r.scriptName || 'Rule')}</span>
+        ${tagsHtml}
+      </div>
+      <div class="regex-item-pattern"><code>${escapeHtml(r.findRegex || '(empty)')}</code></div>`;
+    box.append(item);
+  });
+}
+
+function selectRegex(id) {
+  state.editingRegexId = id;
+  const r = state.settings.regexScripts?.find((x) => x.id === id);
+  if (!r) {
+    if (els.btnDeleteRegex) els.btnDeleteRegex.disabled = true;
+    if (els.btnSaveRegex) els.btnSaveRegex.disabled = true;
+    if (els.rx_name) els.rx_name.value = '';
+    if (els.rx_find) els.rx_find.value = '';
+    if (els.rx_replace) els.rx_replace.value = '';
+    if (els.rx_pUser) els.rx_pUser.checked = false;
+    if (els.rx_pAi) els.rx_pAi.checked = false;
+    if (els.rx_pDisplay) els.rx_pDisplay.checked = true;
+    if (els.rx_pPrompt) els.rx_pPrompt.checked = false;
+    if (els.rx_pWorld) els.rx_pWorld.checked = false;
+    if (els.rx_disabled) els.rx_disabled.checked = false;
+    if (els.rx_runOnEdit) els.rx_runOnEdit.checked = false;
+    return;
+  }
+  if (els.btnDeleteRegex) els.btnDeleteRegex.disabled = false;
+  if (els.btnSaveRegex) els.btnSaveRegex.disabled = false;
+  if (els.rx_name) els.rx_name.value = r.scriptName || '';
+  if (els.rx_find) els.rx_find.value = r.findRegex || '';
+  if (els.rx_replace) els.rx_replace.value = r.replaceString || '';
+  const plc = r.placement || [];
+  if (els.rx_pUser) els.rx_pUser.checked = plc.includes(PLACEMENT.USER_INPUT);
+  if (els.rx_pAi) els.rx_pAi.checked = plc.includes(PLACEMENT.AI_OUTPUT);
+  if (els.rx_pDisplay) els.rx_pDisplay.checked = plc.includes(PLACEMENT.DISPLAY_ONLY);
+  if (els.rx_pPrompt) els.rx_pPrompt.checked = plc.includes(PLACEMENT.REQUEST_PROMPT);
+  if (els.rx_pWorld) els.rx_pWorld.checked = plc.includes(PLACEMENT.WORLD_INFO);
+  if (els.rx_disabled) els.rx_disabled.checked = !!r.disabled;
+  if (els.rx_runOnEdit) els.rx_runOnEdit.checked = !!r.runOnEdit;
+  runRegexTester();
+}
+
+function newRegex() {
+  const isEn = getLang() === 'en';
+  const nr = normalizeRegexScript({
+    id: uid(),
+    scriptName: isEn ? 'New Regex Rule' : '新正则规则',
+    findRegex: '',
+    replaceString: '',
+    placement: [PLACEMENT.DISPLAY_ONLY],
+    disabled: false,
+  });
+  state.settings.regexScripts.push(nr);
+  state.editingRegexId = nr.id;
+  saveSettings();
+  renderRegexList();
+  selectRegex(nr.id);
+  if (els.rx_name) { els.rx_name.focus(); els.rx_name.select(); }
+}
+
+function saveRegex() {
+  const r = state.settings.regexScripts?.find((x) => x.id === state.editingRegexId);
+  if (!r) return;
+  const pattern = els.rx_find.value;
+  try {
+    compileRegex(pattern);
+  } catch (e) {
+    toast('正则表达式格式错误: ' + e.message, 3000);
+    return;
+  }
+  r.scriptName = els.rx_name.value.trim() || (getLang() === 'en' ? 'Unnamed Rule' : '未命名规则');
+  r.findRegex = pattern;
+  r.replaceString = els.rx_replace.value;
+  const placements = [];
+  if (els.rx_pUser.checked) placements.push(PLACEMENT.USER_INPUT);
+  if (els.rx_pAi.checked) placements.push(PLACEMENT.AI_OUTPUT);
+  if (els.rx_pDisplay.checked) placements.push(PLACEMENT.DISPLAY_ONLY);
+  if (els.rx_pPrompt.checked) placements.push(PLACEMENT.REQUEST_PROMPT);
+  if (els.rx_pWorld.checked) placements.push(PLACEMENT.WORLD_INFO);
+  r.placement = placements;
+  r.disabled = els.rx_disabled.checked;
+  r.runOnEdit = els.rx_runOnEdit.checked;
+
+  saveSettings();
+  renderRegexList();
+  renderPanel();
+  toast(t('regexSaved') || '正则规则已保存');
+}
+
+function deleteRegex(id) {
+  if (!id) return;
+  const r = state.settings.regexScripts?.find((x) => x.id === id);
+  if (!r || !confirm(t('confirmDeleteRegex', r.scriptName) || `确定删除正则规则「${r.scriptName}」？`)) return;
+  state.settings.regexScripts = state.settings.regexScripts.filter((x) => x.id !== id);
+  state.editingRegexId = state.settings.regexScripts[0]?.id || null;
+  saveSettings();
+  renderRegexList();
+  selectRegex(state.editingRegexId);
+  renderPanel();
+  toast(t('regexDeleted') || '已删除正则规则');
+}
+
+function loadRegexPresets() {
+  let count = 0;
+  for (const pr of DEFAULT_REGEX_SCRIPTS) {
+    if (!state.settings.regexScripts.some((x) => x.findRegex === pr.findRegex)) {
+      state.settings.regexScripts.push(clone(pr));
+      count++;
+    }
+  }
+  if (!state.editingRegexId && state.settings.regexScripts.length) {
+    state.editingRegexId = state.settings.regexScripts[0].id;
+  }
+  saveSettings();
+  renderRegexList();
+  selectRegex(state.editingRegexId);
+  renderPanel();
+  toast(t('presetsLoadedToast', count) || `已成功加载 ${count} 条常用正则预设`);
+}
+
+async function importRegexFile(file) {
+  try {
+    const text = await file.text();
+    const list = parseRegexScriptsJson(text);
+    if (!list.length) throw new Error('未在文件中找到有效的正则脚本');
+    state.settings.regexScripts.push(...list);
+    saveSettings();
+    renderRegexList();
+    renderPanel();
+    toast(t('regexImportSuccess', list.length) || `已导入 ${list.length} 条正则规则`);
+  } catch (e) {
+    toast((t('regexImportFail') || '导入正则脚本失败: ') + e.message, 4000);
+  }
+}
+
+function exportRegexFile() {
+  const jsonStr = exportRegexScriptsJson(state.settings.regexScripts);
+  download('nexus-regex-scripts.json', jsonStr, 'application/json');
+  toast(t('exportSuccess') || '导出成功');
+}
+
+function runRegexTester() {
+  const input = els.rx_testInput?.value ?? '';
+  const outBox = els.rx_testOutput;
+  const countBox = els.rx_testCount;
+  if (!outBox) return;
+  const dummyScript = {
+    findRegex: els.rx_find?.value ?? '',
+    replaceString: els.rx_replace?.value ?? '',
+    disabled: false,
+  };
+  try {
+    const res = testRegexScript(dummyScript, input);
+    outBox.textContent = res.output ?? '';
+    if (countBox) countBox.textContent = t('regexMatchCountLabel', res.matchCount) || `命中 ${res.matchCount} 处`;
+  } catch (e) {
+    outBox.textContent = '(匹配错误: ' + e.message + ')';
+    if (countBox) countBox.textContent = '语法错误';
+  }
+}
+
 // ======================= 主题 / 布局 =======================
 function applyTheme() {
   const t = state.settings.theme;
@@ -2563,6 +3549,170 @@ function bindEvents() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'o') { e.preventDefault(); newChat(); }
     if (e.key === 'Escape' && state.generating && !document.querySelector('dialog[open]')) stopGeneration();
   });
+  // 角色卡、世界书与正则侧栏及面板入口
+  els.btnCharacters?.addEventListener('click', () => openCharacters());
+  els.btnManageChars?.addEventListener('click', () => openCharacters());
+  els.btnLorebooks?.addEventListener('click', () => openLorebooks());
+  els.btnOpenLorebooks?.addEventListener('click', () => openLorebooks());
+  els.btnRegex?.addEventListener('click', () => openRegex());
+  els.btnOpenRegex?.addEventListener('click', () => openRegex());
+  els.btnUnbindChar?.addEventListener('click', unbindCharFromConv);
+  els.charGreetingSelect?.addEventListener('change', () => onGreetingChange(Number(els.charGreetingSelect.value)));
+
+  // 角色卡弹窗
+  els.btnNewChar?.addEventListener('click', newChar);
+  els.btnImportChar?.addEventListener('click', () => els.charFileInput?.click());
+  els.charFileInput?.addEventListener('change', (e) => {
+    if (e.target.files[0]) importCharFile(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.btnChangeAvatar?.addEventListener('click', () => els.charAvatarInput?.click());
+  els.charAvatarInput?.addEventListener('change', (e) => {
+    if (e.target.files[0]) changeAvatar(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.btnCharNewChat?.addEventListener('click', () => startChatWithChar(state.editingCharId));
+  els.btnCharBindCur?.addEventListener('click', () => bindCharToConv(state.editingCharId));
+  els.btnCharSave?.addEventListener('click', saveChar);
+  els.btnCharExportPng?.addEventListener('click', () => exportCharPng(state.editingCharId));
+  els.btnCharExportJson?.addEventListener('click', () => exportCharJson(state.editingCharId));
+  els.btnCharDelete?.addEventListener('click', () => deleteChar(state.editingCharId));
+  els.charList?.addEventListener('click', (e) => {
+    const item = e.target.closest('.prov-item');
+    if (item?.dataset?.id) {
+      selectChar(item.dataset.id);
+      renderCharList();
+    }
+  });
+
+  // 世界书弹窗
+  els.btnNewLorebook?.addEventListener('click', newLorebook);
+  els.btnImportLorebook?.addEventListener('click', () => els.loreFileInput?.click());
+  els.loreFileInput?.addEventListener('change', (e) => {
+    if (e.target.files[0]) importLorebookFile(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.btnExportLorebook?.addEventListener('click', () => exportLorebookFile(state.editingLorebookId));
+  els.btnDeleteLorebook?.addEventListener('click', () => deleteLorebook(state.editingLorebookId));
+  els.selLorebook?.addEventListener('change', () => {
+    state.editingLorebookId = els.selLorebook.value;
+    renderLoreEntryList();
+  });
+  els.btnNewLoreEntry?.addEventListener('click', newLoreEntry);
+  els.btnSaveLoreEntry?.addEventListener('click', saveLoreEntry);
+  els.btnDeleteLoreEntry?.addEventListener('click', () => deleteLoreEntry(state.editingLoreEntryId));
+  els.lb_name?.addEventListener('input', () => {
+    const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+    if (b) {
+      b.name = els.lb_name.value.trim() || '未命名世界书';
+      db.put('lorebooks', b);
+      renderLorebookSelect();
+    }
+  });
+  els.lb_scanDepth?.addEventListener('input', () => {
+    const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+    if (b) {
+      b.scan_depth = Number(els.lb_scanDepth.value) || 4;
+      db.put('lorebooks', b);
+    }
+  });
+  els.loreTestInput?.addEventListener('input', runLoreTester);
+  els.loreEntryList?.addEventListener('click', (e) => {
+    const tog = e.target.closest('[data-lore-toggle]');
+    const item = e.target.closest('.lore-entry-item');
+    if (!item?.dataset?.id) return;
+    const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
+    const entry = b?.entries?.find((x) => x.id === item.dataset.id);
+    if (!entry) return;
+    if (tog) {
+      entry.enabled = tog.checked;
+      db.put('lorebooks', b);
+      renderExtensionsPanel();
+      updateMeter();
+    } else {
+      selectLoreEntry(entry.id);
+      renderLoreEntryList();
+    }
+  });
+
+  // 正则脚本弹窗
+  els.btnNewRegex?.addEventListener('click', newRegex);
+  els.btnRegexPresets?.addEventListener('click', loadRegexPresets);
+  els.btnImportRegex?.addEventListener('click', () => els.regexFileInput?.click());
+  els.regexFileInput?.addEventListener('change', (e) => {
+    if (e.target.files[0]) importRegexFile(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.btnExportRegex?.addEventListener('click', exportRegexFile);
+  els.btnSaveRegex?.addEventListener('click', saveRegex);
+  els.btnDeleteRegex?.addEventListener('click', () => deleteRegex(state.editingRegexId));
+  els.rx_testInput?.addEventListener('input', runRegexTester);
+  els.rx_find?.addEventListener('input', runRegexTester);
+  els.rx_replace?.addEventListener('input', runRegexTester);
+  els.regexList?.addEventListener('click', (e) => {
+    const tog = e.target.closest('[data-rx-toggle]');
+    const item = e.target.closest('.regex-rule-item');
+    if (!item?.dataset?.id) return;
+    const r = state.settings.regexScripts?.find((x) => x.id === item.dataset.id);
+    if (!r) return;
+    if (tog) {
+      r.disabled = !tog.checked;
+      saveSettings();
+      renderExtensionsPanel();
+    } else {
+      selectRegex(r.id);
+      renderRegexList();
+    }
+  });
+
+  // 全局拖放：支持拖入 PNG 角色卡、JSON 角色卡/世界书/正则
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+  });
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    const files = e.dataTransfer?.files;
+    if (!files || !files.length) return;
+    const file = files[0];
+    if (file.name.toLowerCase().endsWith('.png')) {
+      try {
+        await importCharFile(file);
+        return;
+      } catch {}
+    } else if (file.name.toLowerCase().endsWith('.json')) {
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text);
+        if (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3' || parsed.data?.name) {
+          await importCharFile(file);
+          return;
+        }
+        if (parsed.entries && (Array.isArray(parsed.entries) || typeof parsed.entries === 'object')) {
+          const book = parseLorebookJson(text, file.name);
+          book.id = uid();
+          state.lorebooks.unshift(book);
+          await db.put('lorebooks', book);
+          state.editingLorebookId = book.id;
+          renderLorebookSelect();
+          renderLoreEntryList();
+          renderPanel();
+          updateMeter();
+          toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」`);
+          return;
+        }
+        if (Array.isArray(parsed) && parsed.some((x) => 'findRegex' in x || 'find' in x)) {
+          const list = parseRegexScriptsJson(text);
+          state.settings.regexScripts.push(...list);
+          saveSettings();
+          renderRegexList();
+          renderPanel();
+          toast(t('regexImportSuccess', list.length) || `已导入 ${list.length} 条正则规则`);
+          return;
+        }
+      } catch {}
+    }
+  });
+
   // closedby="any" 的渐进增强：不支持的浏览器点击遮罩关闭
   if (!('closedBy' in HTMLDialogElement.prototype)) {
     const outside = (e, d) => { const r = d.getBoundingClientRect(); return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom; };
@@ -2600,7 +3750,9 @@ async function init() {
     state.convs = (await db.getAll()).map((c) => ({ ...c, params: mergeParams(c.params) }));
     // 修复异常中断时残留的 pending 状态
     for (const c of state.convs) for (const m of c.messages) if (m.pending) { m.pending = false; m.stopped = true; }
-  } catch (e) { toast('读取本地对话失败：' + e.message, 4000); }
+    state.characters = (await db.getAll('characters')) || [];
+    state.lorebooks = (await db.getAll('lorebooks')) || [];
+  } catch (e) { toast('读取本地数据失败：' + e.message, 4000); }
   const latest = [...state.convs].sort((a, b) => b.updatedAt - a.updatedAt)[0];
   if (latest) state.currentId = latest.id;
   else { state.draft = makeConv(); state.currentId = state.draft.id; }

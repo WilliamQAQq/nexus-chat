@@ -4,3 +4,5 @@ Thumbs.db
 .env
 .env.*
 *.log
+scratch/chrome_profile*
+scratch/chrome_profile_*

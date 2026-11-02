@@ -60,6 +60,25 @@ Nexus Chat is a pure modern frontend Web AI chat workspace (with an optional zer
    - Quick temperature chips: `Precise 0`, `Code 0.2`, `Balanced 0.7`, `Creative 1.2`, or `Omit Temp` (for reasoning models like `o1`/`o3`/`R1`).
    - Granular checkboxes, sliders, and numerical inputs for `Temperature`, `Top P`, `Max Output Tokens`, `Presence Penalty`, and `Frequency Penalty`.
 
+5. **SillyTavern Compatible Character Cards (酒馆角色卡)**:
+   - **Full Spec Support**: Seamlessly import Tavern V1, V2 (`spec: 'chara_card_v2'`), and V3 character cards.
+   - **PNG & JSON Import / Export**: Extract base64 `chara` / `ccv3` metadata chunks directly from character avatar PNG images or JSON cards; export cards with CRC32-compliant embedded PNGs.
+   - **Persona & Macro Engine**: Full replacement for `{{char}}`, `<char>`, `{{user}}`, `<user>`, `{{date}}`, `{{time}}`, `{{model}}`.
+   - **Alternate Greetings**: Switch between multiple opening greetings dynamically; customize personality, scenario, dialogue examples (`mes_example`), and post-history instructions.
+   - **1-Click Character Chat**: Auto-inserts greeting and character avatar into messages; quick-start chips on welcome screen.
+
+6. **World Info / Lorebook (世界书关键词引擎)**:
+   - **SillyTavern World Info Specification**: Full support for keyword triggers (`keys`), secondary filters (`secondary_keys`, `selective`), constant entries (`constant`), scan depth, and custom priority orders.
+   - **Flexible Prompt Injection Positioning**: Inject lore seamlessly at `before_sys`, `after_sys`, `before_char`, or `after_char`.
+   - **Interactive Live Tester**: Test prompt keywords in real-time to preview triggered entries and active token counts.
+   - **Context Token Budget Integration**: Triggered lore entries are automatically counted in the real-time context quota progress meter.
+
+7. **Regex Scripts (正则脚本引擎)**:
+   - **Multi-stage Pipeline Placements**: Apply regex rules to User Input (`0`), AI Output (`1`), Display Only (`2`), Request Prompt (`3`), or World Info (`4`).
+   - **Built-in Presets**: 1-click load presets to strip `<think>` tags, convert `*action descriptions*` into clean italics, and compress redundant blank lines.
+   - **Interactive Live Preview**: Real-time regex tester preview with instant match counters.
+   - **Import & Export**: Fully compatible with SillyTavern regex script JSON formatting.
+
 ---
 
 <h2 id="中文文档">中文文档</h2>
@@ -128,3 +147,22 @@ Nexus Chat is a pure modern frontend Web AI chat workspace (with an optional zer
 - **快捷档位**：一键切换 `严谨 0`、`代码 0.2`、`平衡 0.7`、`创意 1.2` 或 `不传温度`（适配 `o1`/`o3`/`R1` 等不支持温度参数的推理模型）。
 - **独立参数开关**：`Temperature`、`Top P`、`Max Tokens`、`Presence Penalty`、`Frequency Penalty` 均配有独立勾选框、滑块与精确数值框，取消勾选即不向 API 发送该字段。
 - **体验增强**：支持思考链 (`<think>` / `reasoning_content` / Claude & Gemini Thinking) 折叠展示、粘贴/拖拽图片与代码文本附件、消息二次编辑重发、代码块一键复制、对话搜索置顶、Markdown 导出及全量 JSON 备份恢复。
+
+### 6. 酒馆同款角色卡 (SillyTavern Character Cards)
+- **多格式兼容**：完整支持 SillyTavern / Tavern V1、V2 (`spec: 'chara_card_v2'`) 及 V3 格式。
+- **PNG 立绘与 JSON 双向导入导出**：自动解析 PNG 图片中的 `tEXt`/`iTXt` base64 角色元数据并提取立绘为头像；导出时严格计算 PNG CRC32 数据块无损写入，完美兼容任意酒馆客户端。
+- **宏变量替换引擎**：全面支持 `{{char}}`、`<char>`、`{{user}}`、`<user>`、`{{date}}`、`{{time}}`、`{{model}}`。
+- **多开场白切换**：支持主开场白 (`first_mes`) 与备选开场白 (`alternate_greetings`) 随时无缝切换；独立配置人设、场景、对话范例 (`mes_example`) 与附加指令。
+- **一键开启角色对话**：自动将角色绑定至对话，消息头像与作者名直接使用角色立绘，欢迎页提供角色快捷入口。
+
+### 7. 世界书与关键词激活引擎 (World Info / Lorebook)
+- **酒馆标准世界书规范**：支持主关键词触发 (`keys`)、次关键词条件筛选 (`secondary_keys`, `selective`)、常驻激活 (`constant`)、扫描深度 (`scan_depth`) 与自定义插入优先级。
+- **多位置系统提示词注入**：支持灵活设定词条插入位置：`系统提示词前 (before_sys)`、`系统提示词后 (after_sys)`、`角色人设前 (before_char)`、`角色人设后 (after_char)`。
+- **实时关键词测试器**：提供交互式词条测试面板，输入文本实时预览匹配命中的词条列表与 Token 开销。
+- **额度进度条实时联动**：世界书命中内容自动纳入上下文窗口实时占用监控与预警。
+
+### 8. 正则脚本自动化管理器 (Regex Scripts)
+- **多阶段管道放置**：支持将正则处理规则作用于 `用户输入 (0)`、`AI 输出 (1)`、`仅用于渲染展示 (2)`、`仅用于请求 Prompt (3)` 或 `世界书 (4)`。
+- **内置常用预设**：一键加载常用脚本（如过滤 `<think>` 思考链标签、将 `*动作描写*` 渲染为标准斜体、压缩多余空行等）。
+- **实时可视化测试面板**：边写边测，即时显示替换后预览效果与匹配次数统计。
+- **导入与导出**：完全兼容 SillyTavern 正则脚本 JSON 格式。

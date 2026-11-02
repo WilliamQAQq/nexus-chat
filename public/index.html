@@ -28,7 +28,14 @@
     </div>
     <nav class="conv-list" id="convList" aria-label="对话列表"></nav>
     <div class="sidebar-foot">
-      <button class="btn ghost block" id="btnPrompts" type="button"><span data-icon="book"></span><span data-i18n="promptLibrary">提示词库</span></button>
+      <div class="sidebar-actions-grid">
+        <button class="btn ghost block" id="btnCharacters" type="button"><span data-icon="user"></span><span data-i18n="characterCards">角色卡</span></button>
+        <button class="btn ghost block" id="btnLorebooks" type="button"><span data-icon="globe"></span><span data-i18n="worldInfo">世界书</span></button>
+      </div>
+      <div class="sidebar-actions-grid">
+        <button class="btn ghost block" id="btnRegex" type="button"><span data-icon="code"></span><span data-i18n="regexScripts">正则脚本</span></button>
+        <button class="btn ghost block" id="btnPrompts" type="button"><span data-icon="book"></span><span data-i18n="promptLibrary">提示词库</span></button>
+      </div>
       <button class="btn ghost block" id="btnSettings" type="button"><span data-icon="gear"></span><span data-i18n="settingsAndApi">设置与 API</span></button>
     </div>
   </aside>
@@ -105,6 +112,50 @@
         </label>
         <label class="check"><input type="checkbox" id="autoTrim"> <span data-i18n="autoTrimLabel">超出窗口时自动截断最早的消息</span></label>
         <label class="check"><input type="checkbox" id="autoCompact"> <span data-i18n="autoCompactLabel">占用超 80% 时发送前自动 AI 压缩早期历史</span></label>
+      </section>
+
+      <section class="card" id="cardCharacter">
+        <div class="card-title">
+          <h3 data-i18n="cardCharacterTitle">角色卡 (Character)</h3>
+          <button class="btn sm ghost" id="btnManageChars" type="button" data-i18n="characterCards">角色库</button>
+        </div>
+        <div id="charActiveCard">
+          <div class="char-banner-empty" id="charEmptyHint" data-i18n="noBoundChar">未绑定角色卡</div>
+          <div class="char-banner" id="charBanner" hidden>
+            <div class="char-avatar-box">
+              <img id="charAvatarImg" alt="Avatar">
+              <div class="char-avatar-fallback" id="charAvatarFallback">👤</div>
+            </div>
+            <div class="char-info">
+              <div class="char-name" id="charNameText"></div>
+              <div class="char-tags" id="charTagsBox"></div>
+            </div>
+          </div>
+          <div class="char-greetings" id="charGreetingWrap" hidden>
+            <label class="field-label" data-i18n="charSelectGreeting">切换开场白</label>
+            <select class="input sm" id="charGreetingSelect"></select>
+          </div>
+          <div class="row-btns" id="charActionBtns" hidden style="margin-top:8px">
+            <button class="btn sm danger" id="btnUnbindChar" type="button" data-i18n="unbindChar">解除绑定</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card" id="cardLore">
+        <div class="card-title">
+          <h3 data-i18n="cardLoreTitle">世界书 (World Info)</h3>
+          <button class="btn sm ghost" id="btnOpenLorebooks" type="button" data-i18n="worldInfo">世界书库</button>
+        </div>
+        <p class="hint" id="loreStatusHint" data-i18n="loreActiveZeroHint">当前未触发世界书词条</p>
+        <div class="lore-active-chips" id="loreActiveChips"></div>
+      </section>
+
+      <section class="card" id="cardRegex">
+        <div class="card-title">
+          <h3 data-i18n="cardRegexTitle">正则脚本</h3>
+          <button class="btn sm ghost" id="btnOpenRegex" type="button" data-i18n="regexScripts">正则管理</button>
+        </div>
+        <p class="hint" id="regexStatusHint"></p>
       </section>
 
       <section class="card" id="cardPrompt">
@@ -365,6 +416,249 @@
       <button class="btn sm" id="sm_export" type="button"><span data-icon="download"></span><span data-i18n="btnExportSummary">导出总结 (.md)</span></button>
       <button class="btn sm" id="sm_toCompact" type="button"><span data-icon="compress"></span><span data-i18n="btnToCompact">应用为上下文压缩</span></button>
       <button class="btn sm primary" id="sm_fork" type="button"><span data-icon="plus"></span><span data-i18n="btnForkSummary">携带总结开启新对话</span></button>
+    </div>
+  </div>
+</dialog>
+
+<!-- 角色卡管理对话框 -->
+<dialog class="dlg dlg-wide" id="dlgCharacters" aria-labelledby="dlgCharTitle" closedby="any">
+  <div class="dlg-head">
+    <h2 id="dlgCharTitle" data-i18n="characterLibraryTitle">角色卡库 (SillyTavern 酒馆同款)</h2>
+    <div class="row-btns" style="margin:0">
+      <button class="btn sm primary" id="btnNewChar" type="button"><span data-icon="plus"></span><span data-i18n="newCharBtn">＋ 新建角色</span></button>
+      <button class="btn sm" id="btnImportChar" type="button"><span data-icon="download"></span><span data-i18n="importCharBtn">导入 (PNG/JSON)</span></button>
+      <input type="file" id="charFileInput" accept=".png,.json,image/png,application/json" hidden>
+    </div>
+    <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
+  </div>
+  <div class="dlg-body">
+    <div class="prov-layout">
+      <div class="prov-side">
+        <div class="prov-list" id="charList"></div>
+      </div>
+      <div class="char-detail-pane" id="charDetailPane" style="display:flex;flex-direction:column;gap:10px;overflow-y:auto;max-height:70vh;padding-right:4px">
+        <div class="char-top-row">
+          <div class="char-avatar-picker">
+            <div class="char-avatar-big" id="ch_avatarBox">
+              <img id="ch_avatarImg" alt="Avatar" style="display:none">
+              <span id="ch_avatarFallback">👤</span>
+            </div>
+            <button class="btn sm" id="btnChangeAvatar" type="button" data-i18n="charAvatarLabel">更换立绘</button>
+            <input type="file" id="charAvatarInput" accept="image/*" hidden>
+          </div>
+          <div class="char-top-meta">
+            <label class="field"><span data-i18n="charNameLabel">角色名称 (name)</span>
+              <input class="input" id="ch_name" type="text" placeholder="例如：爱丽丝">
+            </label>
+            <label class="field"><span data-i18n="charTagsLabel">标签 (逗号分隔)</span>
+              <input class="input" id="ch_tags" type="text" placeholder="探险家, 奇幻, 傲娇">
+            </label>
+            <div class="char-book-badge" id="ch_bookBadge" hidden></div>
+          </div>
+        </div>
+
+        <label class="field"><span data-i18n="charFirstMesLabel">开场白/第一句话 (first_mes)</span>
+          <textarea class="input" id="ch_first_mes" rows="3" placeholder="角色发起的首条问候消息，支持 {{user}} 占位符"></textarea>
+        </label>
+
+        <label class="field"><span data-i18n="charAltGreetingsLabel">备选开场白 (每行一句)</span>
+          <textarea class="input" id="ch_alternate_greetings" rows="2" placeholder="可选其他问候语，每行一条"></textarea>
+        </label>
+
+        <label class="field"><span data-i18n="charDescLabel">角色设定 (description)</span>
+          <textarea class="input" id="ch_description" rows="4" placeholder="外貌、身世、背景设定与身份细节"></textarea>
+        </label>
+
+        <label class="field"><span data-i18n="charPersonalityLabel">性格特征 (personality)</span>
+          <textarea class="input" id="ch_personality" rows="3" placeholder="行为习惯、性格特征、说话口吻与情绪反应"></textarea>
+        </label>
+
+        <label class="field"><span data-i18n="charScenarioLabel">场景/环境 (scenario)</span>
+          <textarea class="input" id="ch_scenario" rows="2" placeholder="当前所处的环境或两人的关系"></textarea>
+        </label>
+
+        <label class="field"><span data-i18n="charMesExampleLabel">对话范例 (mes_example)</span>
+          <textarea class="input" id="ch_mes_example" rows="3" placeholder="&lt;START&gt;&#10;{{user}}: 你好&#10;{{char}}: *微笑* 很高兴认识你"></textarea>
+        </label>
+
+        <details class="advanced-details">
+          <summary data-i18n="advOptionsLabel">高级选项 (提示词覆写与作者说明)</summary>
+          <label class="field" style="margin-top:8px"><span data-i18n="charSysPromptLabel">专属系统提示词 (system_prompt)</span>
+            <textarea class="input" id="ch_system_prompt" rows="3" placeholder="覆盖全局系统提示词"></textarea>
+          </label>
+          <label class="field"><span data-i18n="charPostHistLabel">后置提示词 (post_history_instructions)</span>
+            <textarea class="input" id="ch_post_history_instructions" rows="2" placeholder="注入到对话历史末尾"></textarea>
+          </label>
+          <label class="field"><span data-i18n="charCreatorNotesLabel">作者说明 (creator_notes)</span>
+            <textarea class="input" id="ch_creator_notes" rows="2"></textarea>
+          </label>
+        </details>
+
+        <div class="row-btns" style="margin-top:16px;flex-wrap:wrap">
+          <button class="btn primary" id="btnCharNewChat" type="button"><span data-icon="sparkle"></span><span data-i18n="startChatWithChar">开启新对话</span></button>
+          <button class="btn" id="btnCharBindCur" type="button" data-i18n="bindToCurrentChat">绑定到当前对话</button>
+          <button class="btn" id="btnCharSave" type="button" data-i18n="save">保存角色</button>
+          <button class="btn" id="btnCharExportPng" type="button" data-i18n="exportCharPng">导出 PNG</button>
+          <button class="btn" id="btnCharExportJson" type="button" data-i18n="exportCharJson">导出 JSON</button>
+          <button class="btn danger" id="btnCharDelete" type="button" data-i18n="delete">删除角色</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</dialog>
+
+<!-- 世界书管理对话框 -->
+<dialog class="dlg dlg-wide" id="dlgLorebooks" aria-labelledby="dlgLoreTitle" closedby="any">
+  <div class="dlg-head">
+    <h2 id="dlgLoreTitle" data-i18n="lorebookLibraryTitle">世界书库 (World Info / Lorebook)</h2>
+    <div class="row-btns" style="margin:0">
+      <button class="btn sm primary" id="btnNewLorebook" type="button"><span data-icon="plus"></span><span data-i18n="newLorebookBtn">＋ 新建世界书</span></button>
+      <button class="btn sm" id="btnImportLorebook" type="button"><span data-icon="download"></span><span data-i18n="importLorebookBtn">导入 (JSON)</span></button>
+      <input type="file" id="loreFileInput" accept=".json,application/json" hidden>
+      <button class="btn sm" id="btnExportLorebook" type="button" data-i18n="exportLorebookBtn">导出 (JSON)</button>
+    </div>
+    <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
+  </div>
+  <div class="dlg-body">
+    <div class="lore-layout">
+      <!-- 左栏：书与词条列表 -->
+      <div class="lore-sidebar">
+        <label class="field-label" data-i18n="worldInfo">选择世界书</label>
+        <select class="input" id="selLorebook"></select>
+        <div class="row-btns" style="margin:8px 0">
+          <button class="btn sm" id="btnNewLoreEntry" type="button"><span data-icon="plus"></span><span data-i18n="newLoreEntryBtn">添加词条</span></button>
+          <button class="btn sm danger" id="btnDeleteLorebook" type="button" data-i18n="deleteLorebookBtn">删除世界书</button>
+        </div>
+        <div class="lore-entry-list" id="loreEntryList"></div>
+      </div>
+
+      <!-- 右栏：书设置 + 词条详情 + 触发测试 -->
+      <div class="lore-main-pane">
+        <div class="grid2">
+          <label class="field"><span data-i18n="lorebookNameLabel">世界书名称</span>
+            <input class="input" id="lb_name" type="text">
+          </label>
+          <label class="field"><span data-i18n="lorebookScanDepthLabel">扫描深度 (条消息，0为全量)</span>
+            <input class="input" id="lb_scanDepth" type="number" min="0" max="100">
+          </label>
+        </div>
+
+        <hr style="border:0;border-top:1px solid var(--border);margin:12px 0">
+
+        <div id="loreEntryEditor">
+          <div class="grid2">
+            <label class="field"><span data-i18n="loreEntryNameLabel">词条名称/备注</span>
+              <input class="input" id="le_name" type="text" placeholder="例如：黄金树的秘密">
+            </label>
+            <label class="field"><span data-i18n="loreEntryPosLabel">插入位置 (Position)</span>
+              <select class="input" id="le_position">
+                <option value="after_sys" data-i18n="lorePosAfterSys">系统提示词之后 (after_sys)</option>
+                <option value="before_sys" data-i18n="lorePosBeforeSys">系统提示词之前 (before_sys)</option>
+                <option value="after_char" data-i18n="lorePosAfterChar">角色设定之后 (after_char)</option>
+                <option value="before_char" data-i18n="lorePosBeforeChar">角色设定之前 (before_char)</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid2">
+            <label class="field"><span data-i18n="loreEntryKeysLabel">触发关键词 (逗号或换行分隔，支持 /pattern/i)</span>
+              <input class="input" id="le_keys" type="text" placeholder="黄金树, 黄金律法, /赐福/i">
+            </label>
+            <label class="field"><span data-i18n="loreEntrySecKeysLabel">次要关键词 (可选条件筛选)</span>
+              <input class="input" id="le_secKeys" type="text" placeholder="当开启筛选时，需同时命中此处的词">
+            </label>
+          </div>
+
+          <div class="row-checks">
+            <label class="check"><input type="checkbox" id="le_enabled"> <span data-i18n="loreEntryEnabledLabel">启用该词条</span></label>
+            <label class="check"><input type="checkbox" id="le_constant"> <span data-i18n="loreEntryConstantLabel">常驻激活 (无视关键词)</span></label>
+            <label class="check"><input type="checkbox" id="le_selective"> <span data-i18n="loreEntrySelectiveLabel">条件筛选 (需命中次关键词)</span></label>
+            <label class="field" style="flex:1;max-width:140px;margin:0"><span data-i18n="loreEntryOrderLabel">优先级 (Order)</span>
+              <input class="input sm" id="le_order" type="number" step="1">
+            </label>
+          </div>
+
+          <label class="field" style="margin-top:8px"><span data-i18n="loreEntryContentLabel">注入内容 (Content)</span>
+            <textarea class="input" id="le_content" rows="4" placeholder="当关键词被触发时，这段设定文字将自动注入到模型的上下文中…"></textarea>
+          </label>
+
+          <div class="row-btns" style="margin-top:10px">
+            <button class="btn primary" id="btnSaveLoreEntry" type="button" data-i18n="save">保存词条</button>
+            <button class="btn danger" id="btnDeleteLoreEntry" type="button" data-i18n="delete">删除词条</button>
+          </div>
+        </div>
+
+        <div class="lore-tester" id="loreTester">
+          <h4 data-i18n="loreTesterTitle">关键词触发测试器</h4>
+          <input class="input" id="loreTestInput" type="text" placeholder="输入测试文本（模拟用户对话），测试哪些词条会被激活…" data-i18n-placeholder="loreTestInputPlaceholder">
+          <div class="lore-test-results" id="loreTestResults"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</dialog>
+
+<!-- 正则脚本管理器对话框 -->
+<dialog class="dlg dlg-wide" id="dlgRegex" aria-labelledby="dlgRegexTitle" closedby="any">
+  <div class="dlg-head">
+    <h2 id="dlgRegexTitle" data-i18n="regexManagerTitle">正则脚本管理器 (SillyTavern 兼容)</h2>
+    <div class="row-btns" style="margin:0">
+      <button class="btn sm primary" id="btnNewRegex" type="button"><span data-icon="plus"></span><span data-i18n="newRegexBtn">＋ 新建正则</span></button>
+      <button class="btn sm" id="btnRegexPresets" type="button" data-i18n="regexPresetsBtn">常用预设</button>
+      <button class="btn sm" id="btnImportRegex" type="button"><span data-icon="download"></span><span data-i18n="importRegexBtn">导入 (JSON)</span></button>
+      <input type="file" id="regexFileInput" accept=".json,application/json" hidden>
+      <button class="btn sm" id="btnExportRegex" type="button" data-i18n="exportRegexBtn">导出全部</button>
+    </div>
+    <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
+  </div>
+  <div class="dlg-body">
+    <div class="prov-layout">
+      <div class="prov-side">
+        <div class="prov-list" id="regexList"></div>
+      </div>
+      <div class="regex-editor-pane" id="regexEditorPane" style="display:flex;flex-direction:column;gap:10px;overflow-y:auto;max-height:70vh;padding-right:4px">
+        <label class="field"><span data-i18n="regexNameLabel">脚本名称</span>
+          <input class="input" id="rx_name" type="text" placeholder="例如：过滤思考过程">
+        </label>
+
+        <label class="field"><span data-i18n="regexFindLabel">查找正则 (Find Regex)</span>
+          <input class="input" id="rx_find" type="text" placeholder="/&lt;think&gt;[sS]*?&lt;/think&gt;/gi">
+        </label>
+
+        <label class="field"><span data-i18n="regexReplaceLabel">替换为 (Replace With)</span>
+          <input class="input" id="rx_replace" type="text" placeholder="支持捕获组 $1, $2，留空表示删除匹配文本">
+        </label>
+
+        <label class="field-label" data-i18n="regexPlacementLabel">作用范围 (Placement)</label>
+        <div class="placement-checks">
+          <label class="check"><input type="checkbox" id="rx_pUser"> <span data-i18n="regexPlacementUser">用户输入 (0)</span></label>
+          <label class="check"><input type="checkbox" id="rx_pAi"> <span data-i18n="regexPlacementAi">AI 回复 (1)</span></label>
+          <label class="check"><input type="checkbox" id="rx_pDisplay"> <span data-i18n="regexPlacementDisplay">仅显示渲染 (2)</span></label>
+          <label class="check"><input type="checkbox" id="rx_pPrompt"> <span data-i18n="regexPlacementPrompt">仅发送请求 (3)</span></label>
+          <label class="check"><input type="checkbox" id="rx_pWorld"> <span data-i18n="regexPlacementWorldInfo">世界书注入 (4)</span></label>
+        </div>
+
+        <div class="row-checks" style="margin-top:12px">
+          <label class="check"><input type="checkbox" id="rx_disabled"> <span data-i18n="regexDisabledLabel">禁用此规则</span></label>
+          <label class="check"><input type="checkbox" id="rx_runOnEdit"> <span data-i18n="regexRunOnEditLabel">编辑消息时重算</span></label>
+        </div>
+
+        <div class="row-btns" style="margin-top:12px">
+          <button class="btn primary" id="btnSaveRegex" type="button" data-i18n="save">保存规则</button>
+          <button class="btn danger" id="btnDeleteRegex" type="button" data-i18n="delete">删除规则</button>
+        </div>
+
+        <!-- 实时测试器 -->
+        <div class="regex-tester-box">
+          <h4 data-i18n="regexTesterTitle">实时正则效果测试</h4>
+          <textarea class="input" id="rx_testInput" rows="2" placeholder="在此输入测试文本…" data-i18n-placeholder="regexTestInputPlaceholder"></textarea>
+          <div class="regex-test-out-wrap">
+            <span class="field-label" data-i18n="regexTestOutputLabel">替换输出：</span>
+            <div class="regex-test-preview" id="rx_testOutput"></div>
+            <span class="tag ok" id="rx_testCount" style="width:fit-content;display:none"></span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </dialog>
