@@ -123,20 +123,67 @@ export function parseCharacterCardJson(raw) {
   const isV2OrV3 = (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3') && parsed.data;
   const d = isV2OrV3 ? parsed.data : parsed;
 
+  let description = d.description || d.char_persona || '';
+  let personality = d.personality || '';
+  let scenario = d.scenario || '';
+  let first_mes = d.first_mes || '';
+  let tags = Array.isArray(d.tags) ? [...d.tags] : [];
+
+  // 自适应 AI 生成的角色设定档案 (如具备 demographics, archetype, physical_traits 等结构)
+  if (!description && (d.demographics || d.archetype || d.physical_traits || d.tactical_and_practical_skills || d.dimensional_storage || d.vulnerabilities_and_constraints)) {
+    const descParts = [];
+    if (d.archetype) descParts.push(`【身份定位】${d.archetype}`);
+    if (d.demographics && typeof d.demographics === 'object') {
+      const demoStr = Object.entries(d.demographics).map(([k, v]) => `${k}: ${v}`).join('；');
+      descParts.push(`【基本档案】${demoStr}`);
+      if (d.demographics.gender && !tags.includes(d.demographics.gender)) tags.push(d.demographics.gender);
+    }
+    if (d.physical_traits && typeof d.physical_traits === 'object') {
+      const physStr = Object.entries(d.physical_traits).map(([k, v]) => `${k}: ${v}`).join('；');
+      descParts.push(`【生理与体貌】${physStr}`);
+    }
+    if (d.linguistic_skills && typeof d.linguistic_skills === 'object') {
+      const lingStr = Object.entries(d.linguistic_skills).map(([k, v]) => `${k}: ${v}`).join('；');
+      descParts.push(`【语言能力】${lingStr}`);
+    }
+    if (d.tactical_and_practical_skills && typeof d.tactical_and_practical_skills === 'object') {
+      const tactStr = Object.entries(d.tactical_and_practical_skills).map(([k, v]) => `${k}: ${v}`).join('；');
+      descParts.push(`【战术与技能】${tactStr}`);
+    }
+    if (d.dimensional_storage) {
+      descParts.push(`【随身物资】意念随身空间，内部时间静止，严禁外人目击存取。`);
+    }
+    if (d.vulnerabilities_and_constraints && typeof d.vulnerabilities_and_constraints === 'object') {
+      const vulStr = Object.entries(d.vulnerabilities_and_constraints).map(([k, v]) => `${k}: ${v}`).join('；');
+      descParts.push(`【生存红线与弱点】${vulStr}`);
+    }
+    description = descParts.join('\n\n');
+
+    if (!personality && d.archetype) {
+      personality = `冷静、理智、行事果决的${d.archetype}，具备受过正规训练的战术素养与学者缜密思维。`;
+    }
+    if (!scenario) {
+      scenario = `时空滞留者在充满未知的时代环境中求生与周旋。`;
+    }
+    if (!first_mes) {
+      first_mes = `（警惕地环顾四周，理了理身上的衣物，用沉稳而克制的语气开口）：\n“在这片陌生的境地里，多一分谨慎，就多一分生机。告诉我……你在此处所为何事？”`;
+    }
+  }
+
   const chara = {
     id: d.id || uid(),
     name: (d.name || '未命名角色').trim(),
     avatar: d.avatar || '',
-    description: d.description || '',
-    personality: d.personality || '',
-    scenario: d.scenario || '',
-    first_mes: d.first_mes || '',
+    description,
+    personality,
+    scenario,
+    first_mes,
     alternate_greetings: Array.isArray(d.alternate_greetings) ? d.alternate_greetings.filter(Boolean) : [],
     mes_example: d.mes_example || '',
     system_prompt: d.system_prompt || '',
     post_history_instructions: d.post_history_instructions || '',
     creator_notes: d.creator_notes || d.creatorcomment || '',
-    tags: Array.isArray(d.tags) ? d.tags : [],
+    tags,
     character_book: d.character_book || null,
     creator: d.creator || '',
     character_version: d.character_version || '1.0',

@@ -2407,6 +2407,8 @@ async function importCharFile(file) {
       };
       state.lorebooks.unshift(book);
       await db.put('lorebooks', book);
+      renderLorebookSelect();
+      renderLoreEntryList();
     }
 
     state.characters.unshift(card);
@@ -2414,6 +2416,8 @@ async function importCharFile(file) {
     state.editingCharId = card.id;
     renderCharList();
     selectChar(card.id);
+    renderPanel();
+    updateMeter();
     toast(t('charImportSuccess', card.name) || `已成功导入角色卡「${card.name}」`);
   } catch (e) {
     toast((t('charImportFail') || '导入角色卡失败: ') + e.message, 4000);
@@ -2747,7 +2751,10 @@ async function deleteLorebook(id) {
 async function importLorebookFile(file) {
   try {
     const text = await file.text();
-    const book = parseLorebookJson(text, file.name);
+    const book = parseLorebookJson(text, file.name.replace(/\.json$/i, ''));
+    if (!book.entries || !book.entries.length) {
+      throw new Error('未在 JSON 文件中识别到有效词条内容');
+    }
     book.id = uid();
     state.lorebooks.unshift(book);
     await db.put('lorebooks', book);
@@ -2756,7 +2763,7 @@ async function importLorebookFile(file) {
     renderLoreEntryList();
     renderPanel();
     updateMeter();
-    toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」`);
+    toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」（包含 ${book.entries.length} 条词条）`);
   } catch (e) {
     toast((t('loreImportFail') || '导入世界书失败: ') + e.message, 4000);
   }
@@ -3683,23 +3690,14 @@ function bindEvents() {
       try {
         const text = await file.text();
         const parsed = JSON.parse(text);
-        if (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3' || parsed.data?.name) {
+
+        // 1. 标准酒馆角色卡 V2 / V3 格式
+        if (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3' || (parsed.data && parsed.data.name)) {
           await importCharFile(file);
           return;
         }
-        if (parsed.entries && (Array.isArray(parsed.entries) || typeof parsed.entries === 'object')) {
-          const book = parseLorebookJson(text, file.name);
-          book.id = uid();
-          state.lorebooks.unshift(book);
-          await db.put('lorebooks', book);
-          state.editingLorebookId = book.id;
-          renderLorebookSelect();
-          renderLoreEntryList();
-          renderPanel();
-          updateMeter();
-          toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」`);
-          return;
-        }
+
+        // 2. 正则脚本列表
         if (Array.isArray(parsed) && parsed.some((x) => 'findRegex' in x || 'find' in x)) {
           const list = parseRegexScriptsJson(text);
           state.settings.regexScripts.push(...list);
@@ -3709,7 +3707,50 @@ function bindEvents() {
           toast(t('regexImportSuccess', list.length) || `已导入 ${list.length} 条正则规则`);
           return;
         }
-      } catch {}
+
+        // 3. 具备角色设定特征的 AI 档案 JSON (demographics / archetype / physical_traits)
+        if (parsed.name && (parsed.demographics || parsed.archetype || parsed.physical_traits || parsed.tactical_and_practical_skills || parsed.dimensional_storage)) {
+          // 自动双向导入：既生成角色卡，又生成结构化世界书
+          const charCard = parseCharacterCardJson(text);
+          charCard.id = uid();
+          state.characters.unshift(charCard);
+          await db.put('characters', charCard);
+          state.editingCharId = charCard.id;
+          renderCharList();
+
+          const book = parseLorebookJson(text, file.name.replace(/\.json$/i, ''));
+          if (book.entries?.length) {
+            book.id = uid();
+            state.lorebooks.unshift(book);
+            await db.put('lorebooks', book);
+            state.editingLorebookId = book.id;
+            renderLorebookSelect();
+            renderLoreEntryList();
+          }
+
+          renderPanel();
+          updateMeter();
+          toast(`已成功导入角色卡「${charCard.name}」与配套世界书（共 ${book.entries?.length || 0} 条词条）`);
+          return;
+        }
+
+        // 4. 通用世界书 / 设定集 / 术语词典 JSON
+        const book = parseLorebookJson(text, file.name.replace(/\.json$/i, ''));
+        if (book.entries && book.entries.length) {
+          book.id = uid();
+          state.lorebooks.unshift(book);
+          await db.put('lorebooks', book);
+          state.editingLorebookId = book.id;
+          renderLorebookSelect();
+          renderLoreEntryList();
+          renderPanel();
+          updateMeter();
+          toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」（共 ${book.entries.length} 条词条）`);
+          return;
+        }
+      } catch (err) {
+        toast('解析 JSON 失败: ' + err.message, 3000);
+      }
     }
   });
 
