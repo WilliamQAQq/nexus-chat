@@ -21,6 +21,7 @@
   --ok: #059669;
   --code-bg: #f4f5f8;
   --seg-sys: #a855f7;
+  --seg-cmp: #0284c7;
   --seg-hist: #5b55e6;
   --seg-inp: #10b981;
 
@@ -40,6 +41,7 @@
       --ok: #34d399;
       --code-bg: #0a0c10;
       --seg-sys: #c084fc;
+      --seg-cmp: #38bdf8;
       --seg-hist: #8b8cfa;
       --seg-inp: #34d399;
     }
@@ -59,6 +61,7 @@
     --ok: #34d399;
     --code-bg: #0a0c10;
     --seg-sys: #c084fc;
+    --seg-cmp: #38bdf8;
     --seg-hist: #8b8cfa;
     --seg-inp: #34d399;
   }
@@ -78,6 +81,7 @@
     --ok: light-dark(#059669, #34d399);
     --code-bg: light-dark(#f4f5f8, #0a0c10);
     --seg-sys: light-dark(#a855f7, #c084fc);
+    --seg-cmp: light-dark(#0284c7, #38bdf8);
     --seg-hist: light-dark(#5b55e6, #8b8cfa);
     --seg-inp: light-dark(#10b981, #34d399);
   }
@@ -276,6 +280,35 @@ textarea.input { resize: vertical; line-height: 1.5; }
 .sys-banner summary::-webkit-details-marker { display: none; }
 .sys-banner .sys-text { white-space: pre-wrap; margin-top: .5em; color: var(--text); }
 
+.compact-archive {
+  border: 1px dashed var(--border); border-radius: var(--radius); padding: .45em .9em; margin-bottom: 12px;
+  background: var(--bg-soft); font-size: .85em; color: var(--text-dim);
+}
+.compact-archive > summary { cursor: pointer; user-select: none; padding: .15em 0; }
+.compact-archive-list { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--border); font-size: 1rem; color: var(--text); opacity: .78; }
+
+.compact-banner {
+  border: 1px solid color-mix(in oklab, var(--seg-cmp) 45%, var(--border));
+  background: color-mix(in oklab, var(--seg-cmp) 7%, var(--bg-elev));
+  border-radius: var(--radius); padding: .6em .95em; margin-bottom: 22px; font-size: .88em;
+}
+.compact-banner > summary {
+  cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
+}
+.compact-banner > summary::-webkit-details-marker { display: none; }
+.compact-banner .compact-title { font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.compact-banner .compact-body { margin-top: .65em; padding-top: .65em; border-top: 1px dashed var(--border); font-size: .95em; }
+
+.compact-stats {
+  background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px;
+  padding: .65em .9em; margin-bottom: .9em; font-size: .88em; line-height: 1.6;
+}
+.summary-box {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 16px; min-height: 210px; max-height: 44vh; overflow-y: auto; font-size: .92em;
+}
+.summary-box:empty::before { content: "点击上方“AI 生成对话总结”即可提炼本对话的结构化纪要、要点或行动清单。"; color: var(--text-dim); }
+
 .msg { display: flex; gap: 12px; margin-bottom: 22px; }
 .avatar {
   flex: none; width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center;
@@ -287,6 +320,8 @@ textarea.input { resize: vertical; line-height: 1.5; }
 .msg-meta b { color: var(--text); font-weight: 600; }
 .tag { padding: 0 .5em; border-radius: 99px; background: var(--bg-soft); }
 .tag.warn { color: var(--warn); }
+.tag.ok { color: var(--ok); background: color-mix(in oklab, var(--ok) 12%, transparent); }
+.tag.info { color: var(--seg-cmp); background: color-mix(in oklab, var(--seg-cmp) 12%, transparent); }
 .msg.user .msg-content {
   background: var(--accent-soft); padding: .7em 1em; border-radius: 4px var(--radius) var(--radius) var(--radius);
   display: inline-block; max-width: 100%;
@@ -379,6 +414,7 @@ textarea.input { resize: vertical; line-height: 1.5; }
 .meter-bar { position: relative; flex: 1; min-width: 64px; max-width: 220px; height: 6px; border-radius: 99px; background: var(--bg-soft); overflow: hidden; display: flex; }
 .seg { display: block; height: 100%; transition: width .25s ease; }
 .seg.sys { background: var(--seg-sys); }
+.seg.cmp { background: var(--seg-cmp); }
 .seg.hist { background: var(--seg-hist); }
 .seg.inp { background: var(--seg-inp); }
 .seg.res { background: repeating-linear-gradient(45deg, var(--text-dim) 0 3px, transparent 3px 6px); opacity: .5; }

@@ -28,6 +28,8 @@ const ICONS = {
   x: '<path d="M18 6L6 18M6 6l12 12"/>',
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
   eyeOff: '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>',
+  compress: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>',
+  sparkle: '<path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"/>',
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 function hydrateIcons(root = document) {
@@ -114,7 +116,7 @@ const ssDel = (k) => { try { sessionStorage.removeItem(k); } catch {} };
 const DEFAULT_PARAMS = {
   temperature: 0.7, top_p: 1, max_tokens: 4096, presence_penalty: 0, frequency_penalty: 0,
   enabled: { temperature: true, top_p: false, max_tokens: true, presence_penalty: false, frequency_penalty: false },
-  stream: true, contextWindow: 128000, maxHistory: 0, autoTrim: true,
+  stream: true, contextWindow: 128000, maxHistory: 0, autoTrim: true, autoCompact: false,
 };
 const DEFAULT_PROMPTS = [
   { name: '通用助手', content: '你是一个乐于助人、知识渊博的 AI 助手（当前日期：{{date}}）。回答要准确、清晰、有条理，必要时使用 Markdown 格式（标题、列表、表格、代码块）。' },
@@ -162,6 +164,9 @@ const state = {
   currentId: null,
   draft: null,          // 尚未发送消息的新对话
   generating: null,     // { convId, msgId, controller }
+  compacting: null,     // { controller, kind: 'compact'|'summary' }
+  summaryStyle: 'structured',
+  summaryEditing: false,
   attachments: [],      // { kind:'image'|'text', name, data }
   editingProviderId: null,
   editingPromptId: null,
@@ -243,6 +248,7 @@ function ensureTarget(conv) {
 
 function newChat() {
   if (state.generating) stopGeneration();
+  if (state.compacting) stopCompaction();
   state.draft = makeConv();
   state.currentId = state.draft.id;
   state.editingMsgId = null;
@@ -267,6 +273,7 @@ async function deleteConv(id) {
   const c = state.convs.find((x) => x.id === id);
   if (!c || !confirm(`确定删除对话「${c.title}」？`)) return;
   if (state.generating?.convId === id) stopGeneration();
+  if (state.compacting?.convId === id) stopCompaction();
   state.convs = state.convs.filter((x) => x.id !== id);
   await db.del(id);
   if (state.currentId === id) {
@@ -292,7 +299,19 @@ function openPanelTo(cardId, focusEl) {
   if (focusEl) setTimeout(() => focusEl.focus(), 120);
 }
 
-// ======================= 上下文计算 =======================
+// ======================= 上下文计算与压缩切分 =======================
+const COMPACT_PREFIX = '【前文对话压缩摘要】\n';
+const COMPACT_ACK = '我已了解上述前文背景与关键结论，请继续。';
+
+function getCompactionSplit(conv) {
+  const comp = conv?.compaction?.summary?.trim() ? conv.compaction : null;
+  if (!comp) return { comp: null, upToIdx: -1, archived: [], active: conv?.messages ?? [] };
+  const upToIdx = comp.upToMsgId ? conv.messages.findIndex((m) => m.id === comp.upToMsgId) : -1;
+  const archived = upToIdx >= 0 ? conv.messages.slice(0, upToIdx + 1) : [];
+  const active = upToIdx >= 0 ? conv.messages.slice(upToIdx + 1) : conv.messages;
+  return { comp, upToIdx, archived, active };
+}
+
 function computeContext(conv, draftText = '', draftImages = 0) {
   const p = conv.params;
   const limit = Math.max(512, Number(p.contextWindow) || 128000);
@@ -300,32 +319,46 @@ function computeContext(conv, draftText = '', draftImages = 0) {
   const sys = resolvedSys.trim() ? estimateTokens(resolvedSys) + 4 : 0;
   const reserve = p.enabled.max_tokens ? p.max_tokens : 0;
   const input = draftText || draftImages ? estimateTokens(draftText) + 4 + draftImages * IMAGE_TOKENS : 0;
-  const budget = limit - reserve - sys - input;
-  const allNonErr = conv.messages.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
+
+  const { comp, archived, active } = getCompactionSplit(conv);
+  const compMsgs = comp ? [
+    { id: '__compact_u', role: 'user', content: COMPACT_PREFIX + comp.summary.trim() },
+    { id: '__compact_a', role: 'assistant', content: COMPACT_ACK },
+  ] : [];
+  const compTokens = comp ? messageTokens(compMsgs[0]) + messageTokens(compMsgs[1]) : 0;
+  const archivedValid = archived.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
+  const archivedRaw = archivedValid.reduce((s, m) => s + messageTokens(m), 0);
+  const savedTokens = comp ? Math.max(0, (archivedRaw || comp.originalTokens || 0) - compTokens) : 0;
+
+  const budget = limit - reserve - sys - input - compTokens;
+  const allNonErr = active.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
   const manualExcluded = allNonErr.filter((m) => m.excluded).length;
   const valid = allNonErr.filter((m) => !m.excluded);
-  let included;
+  let includedActive;
   if (p.maxHistory > 0) {
     if (!draftText && !draftImages && valid.at(-1)?.role === 'user') {
-      included = [...valid.slice(0, -1).slice(-p.maxHistory), valid.at(-1)];
+      includedActive = [...valid.slice(0, -1).slice(-p.maxHistory), valid.at(-1)];
     } else {
-      included = valid.slice(-p.maxHistory);
+      includedActive = valid.slice(-p.maxHistory);
     }
-  } else included = valid.slice();
-  let history = included.reduce((s, m) => s + messageTokens(m), 0);
-  const limitedByCount = valid.length - included.length;
+  } else includedActive = valid.slice();
+  let history = includedActive.reduce((s, m) => s + messageTokens(m), 0);
+  const limitedByCount = valid.length - includedActive.length;
   let trimmedByWindow = 0;
   if (p.autoTrim) {
-    while (included.length > 1 && history > budget) {
-      history -= messageTokens(included.shift());
+    while (includedActive.length > 1 && history > budget) {
+      history -= messageTokens(includedActive.shift());
       trimmedByWindow++;
     }
   }
-  const used = sys + history + input;
+  const included = [...compMsgs, ...includedActive];
+  const used = sys + compTokens + history + input;
   return {
-    sys, history, input, reserve, used, total: used + reserve, limit,
-    includedIds: new Set(included.map((m) => m.id)), included,
+    sys, comp: compTokens, history, input, reserve, used, total: used + reserve, limit,
+    includedIds: new Set(includedActive.map((m) => m.id)), included,
+    includedActiveCount: includedActive.length,
     limitedByCount, trimmedByWindow, manualExcluded, totalMsgs: allNonErr.length,
+    hasCompaction: !!comp, archivedCount: archivedValid.length || comp?.compressedCount || 0, savedTokens,
   };
 }
 
@@ -344,7 +377,11 @@ function renderConvList() {
   const q = els.searchConv.value.trim().toLowerCase();
   const list = [...state.convs]
     .sort((a, b) => (b.pinned - a.pinned) || (b.updatedAt - a.updatedAt))
-    .filter((c) => !q || c.title.toLowerCase().includes(q) || c.messages.some((m) => m.content?.toLowerCase().includes(q)));
+    .filter((c) => !q
+      || c.title.toLowerCase().includes(q)
+      || c.compaction?.summary?.toLowerCase().includes(q)
+      || c.summary?.content?.toLowerCase().includes(q)
+      || c.messages.some((m) => m.content?.toLowerCase().includes(q)));
   if (!list.length) {
     els.convList.innerHTML = `<div class="empty-hint">${q ? '没有匹配的对话' : '还没有对话<br>发送第一条消息开始吧'}</div>`;
     return;
@@ -360,7 +397,7 @@ function renderConvList() {
         <button class="icon-btn sm" type="button" data-op="delete" title="删除">${icon('trash')}</button>
       </div>`;
     item.querySelector('.conv-title').textContent = (c.pinned ? '📌 ' : '') + c.title;
-    item.querySelector('.conv-sub').textContent = `${c.messages.length} 条消息 · ${relTime(c.updatedAt)}`;
+    item.querySelector('.conv-sub').textContent = `${c.messages.length} 条消息${c.compaction?.summary ? ' · 📦' : ''} · ${relTime(c.updatedAt)}`;
     return item;
   }));
 }
@@ -494,41 +531,82 @@ function welcomeEl() {
 function renderMessages(forceBottom = false) {
   const conv = currentConv();
   const box = els.messages;
-  if (!conv || !conv.messages.length) { box.replaceChildren(welcomeEl()); return; }
+  const { comp, archived, active } = getCompactionSplit(conv);
+  if (!conv || (!conv.messages.length && !comp)) { box.replaceChildren(welcomeEl()); return; }
+  const prevSysOpen = box.querySelector('details.sys-banner')?.open ?? false;
+  const prevArcOpen = box.querySelector('details.compact-archive')?.open ?? false;
+  const prevCmpEl = box.querySelector('details.compact-banner');
+  const prevCmpOpen = prevCmpEl ? prevCmpEl.open : !conv.messages.length;
+
   const ctx = computeContext(conv);
   const inner = document.createElement('div');
   inner.className = 'messages-inner';
   if (conv.systemPrompt?.trim()) {
     const d = document.createElement('details');
     d.className = 'sys-banner';
+    d.open = prevSysOpen;
     d.innerHTML = `<summary><span class="sys-sum"></span><button class="btn sm" type="button" data-act="edit-sys">编辑</button></summary><div class="sys-text"></div>`;
     d.querySelector('.sys-sum').textContent = `⚙ 系统提示词 · 约 ${formatTokens(ctx.sys)} tokens`;
     d.querySelector('.sys-text').textContent = conv.systemPrompt;
     inner.append(d);
   }
-  conv.messages.forEach((m) => inner.append(messageEl(m, conv, ctx)));
+  if (archived.length) {
+    const arc = document.createElement('details');
+    arc.className = 'compact-archive';
+    arc.open = prevArcOpen;
+    const sum = document.createElement('summary');
+    sum.textContent = `📦 已压缩归档早期对话（${archived.length} 条原始消息 · 已由下方摘要替代发送，点击展开查看）`;
+    const list = document.createElement('div');
+    list.className = 'compact-archive-list';
+    archived.forEach((m) => list.append(messageEl(m, conv, ctx, true)));
+    arc.append(sum, list);
+    inner.append(arc);
+  }
+  if (comp) {
+    const cb = document.createElement('details');
+    cb.className = 'compact-banner';
+    cb.open = prevCmpOpen;
+    cb.innerHTML = `<summary>
+      <span class="compact-title"><span class="cmp-label"></span></span>
+      <span class="row-btns" style="margin:0">
+        <button class="btn sm" type="button" data-act="compact-open">编辑</button>
+        <button class="btn sm" type="button" data-act="compact-copy">复制</button>
+        <button class="btn sm danger" type="button" data-act="compact-revoke">撤销</button>
+      </span>
+    </summary><div class="compact-body md"></div>`;
+    cb.querySelector('.cmp-label').textContent = `✨ 上下文压缩摘要 · 约 ${formatTokens(ctx.comp)} tokens`;
+    if (ctx.savedTokens > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'tag ok';
+      badge.textContent = `已省 ≈ ${formatTokens(ctx.savedTokens)} tokens`;
+      cb.querySelector('.compact-title').append(badge);
+    }
+    cb.querySelector('.compact-body').innerHTML = renderMarkdown(comp.summary);
+    inner.append(cb);
+  }
+  active.forEach((m) => inner.append(messageEl(m, conv, ctx, false)));
   const prevTop = box.scrollTop;
   box.replaceChildren(inner);
   if (forceBottom || state.stick) box.scrollTop = box.scrollHeight;
   else box.scrollTop = prevTop;
 }
 
-function messageEl(m, conv, ctx) {
+function messageEl(m, conv, ctx, isArchived = false) {
   const el = document.createElement('article');
   el.className = `msg ${m.role}`;
   el.dataset.id = m.id;
   if (m.error) el.classList.add('error');
-  else if (!m.pending && !ctx.includedIds.has(m.id)) el.classList.add('excluded');
+  else if (!isArchived && !m.pending && !ctx.includedIds.has(m.id)) el.classList.add('excluded');
   el.innerHTML = `<div class="avatar">${m.role === 'user' ? '你' : 'AI'}</div>
     <div class="msg-body"><div class="msg-meta"></div><div class="msg-content"></div><div class="msg-actions"></div></div>`;
-  fillMeta(el, m, ctx);
+  fillMeta(el, m, ctx, isArchived);
   if (state.editingMsgId === m.id) fillEditor(el, m);
   else fillContent(el, m);
-  fillActions(el, m, ctx);
+  fillActions(el, m, isArchived);
   return el;
 }
 
-function fillMeta(el, m, ctx) {
+function fillMeta(el, m, ctx, isArchived = false) {
   const meta = el.querySelector('.msg-meta');
   meta.innerHTML = '';
   const b = document.createElement('b');
@@ -545,7 +623,9 @@ function fillMeta(el, m, ctx) {
     if (m.usage?.completion) s += ` · ${(m.usage.completion / sec).toFixed(1)} tok/s`;
     add(s);
   }
-  if (ctx && !m.pending && !m.error && !ctx.includedIds.has(m.id)) {
+  if (isArchived && !m.error) {
+    add('已归档压缩', 'tag info');
+  } else if (ctx && !m.pending && !m.error && !ctx.includedIds.has(m.id)) {
     add(m.excluded ? '已手动移出上下文' : '超出窗口未携带', 'tag warn');
   }
   if (m.finish === 'length' || m.finish === 'max_tokens' || m.finish === 'MAX_TOKENS') add('因达到最大输出长度而截断', 'tag warn');
@@ -586,8 +666,16 @@ function fillContent(el, m) {
   if (content || !m.pending || !reasoning) {
     const md = document.createElement('div');
     md.className = 'md';
-    if (m.pending && !content && !reasoning) md.innerHTML = '<div class="typing"><i></i><i></i><i></i></div>';
-    else md.innerHTML = renderMarkdown(content) + (m.pending ? '<span class="cursor"></span>' : '');
+    if (m.pending && !content && !reasoning) {
+      if (m.compactingHint) {
+        const hint = document.createElement('div');
+        hint.className = 'note';
+        hint.textContent = m.compactingHint;
+        md.append(hint);
+      } else {
+        md.innerHTML = '<div class="typing"><i></i><i></i><i></i></div>';
+      }
+    } else md.innerHTML = renderMarkdown(content) + (m.pending ? '<span class="cursor"></span>' : '');
     if (content || m.pending) c.append(md);
   }
   if (m.error) {
@@ -615,14 +703,14 @@ function fillEditor(el, m) {
   requestAnimationFrame(() => { ta.focus(); ta.style.height = Math.min(ta.scrollHeight + 4, innerHeight * 0.5) + 'px'; });
 }
 
-function fillActions(el, m) {
+function fillActions(el, m, isArchived = false) {
   const a = el.querySelector('.msg-actions');
   if (m.pending || state.editingMsgId === m.id) { a.replaceChildren(); return; }
-  const busy = !!state.generating;
+  const busy = !!(state.generating || state.compacting);
   const btn = (act, ic, title, disabled = false) =>
     `<button class="icon-btn sm" type="button" data-act="${act}" title="${title}" aria-label="${title}"${disabled ? ' disabled' : ''}>${icon(ic)}</button>`;
   let html = btn('copy', 'copy', '复制');
-  if (!m.error) {
+  if (!m.error && !isArchived) {
     html += btn('toggle-ctx', m.excluded ? 'eye' : 'eyeOff', m.excluded ? '重新纳入上下文' : '从上下文中移出（节省额度）', busy);
   }
   if (m.role === 'assistant') html += btn('regen', 'refresh', m.error ? '重试' : '重新生成', busy);
@@ -672,6 +760,7 @@ function renderPanel() {
   els.ctxWindow.value = p.contextWindow;
   els.maxHistory.value = p.maxHistory;
   els.autoTrim.checked = p.autoTrim;
+  els.autoCompact.checked = !!p.autoCompact;
   els.streamToggle.checked = p.stream;
   if (document.activeElement !== els.sysPrompt) els.sysPrompt.value = conv.systemPrompt || '';
   els.sysTokens.textContent = `≈ ${formatTokens(estimateTokens(expandPrompt(conv.systemPrompt, conv.model)))} tokens`;
@@ -699,19 +788,24 @@ function updateMeter() {
   const level = ratio > 1 ? 'danger' : ratio > 0.8 ? 'warn' : '';
 
   const setBar = (bar) => {
-    const [s, h, i, r] = bar.querySelectorAll('.seg');
-    s.style.width = pct(ctx.sys); h.style.width = pct(ctx.history); i.style.width = pct(ctx.input); r.style.width = pct(ctx.reserve);
+    const [s, c, h, i, r] = bar.querySelectorAll('.seg');
+    s.style.width = pct(ctx.sys);
+    c.style.width = pct(ctx.comp);
+    h.style.width = pct(ctx.history);
+    i.style.width = pct(ctx.input);
+    r.style.width = pct(ctx.reserve);
   };
   setBar(els.meterBar);
   els.meter.className = `meter ${level}`;
   const trimmed = ctx.trimmedByWindow + ctx.limitedByCount + ctx.manualExcluded;
   els.meterText.textContent = `上下文 ${formatTokens(ctx.used)} / ${formatTokens(ctx.limit)}` +
+    (ctx.hasCompaction ? ` · 📦已压缩${ctx.savedTokens ? '(省' + formatTokens(ctx.savedTokens) + ')' : ''}` : '') +
     (ctx.reserve ? ` · 预留 ${formatTokens(ctx.reserve)}` : '') + (trimmed ? ` · 已排除 ${trimmed} 条` : '');
   els.inputTokens.textContent = ctx.input ? `本条 ≈ ${formatTokens(ctx.input)}` : '';
 
   // 顶栏上下文胶囊
   const totalPct = Math.round(ratio * 100);
-  els.topCtxBtn.textContent = `📊 ${formatTokens(ctx.used)}/${formatTokens(ctx.limit)} (${totalPct}%)`;
+  els.topCtxBtn.textContent = `${ctx.hasCompaction ? '📦' : '📊'} ${formatTokens(ctx.used)}/${formatTokens(ctx.limit)} (${totalPct}%)`;
   els.topCtxBtn.className = `pill-btn ${level}`;
 
   const free = ctx.limit - ctx.total;
@@ -724,19 +818,20 @@ function updateMeter() {
 
   els.ctxDetail.innerHTML = `
     <div class="ctx-big">${formatTokens(ctx.used)} <small>/ ${formatTokens(ctx.limit)} tokens（含预留占 ${(ratio * 100).toFixed(1)}%）</small></div>
-    <div class="meter-bar"><i class="seg sys"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i></div>
+    <div class="meter-bar"><i class="seg sys"></i><i class="seg cmp"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i></div>
     <div class="ctx-rows">
       <i class="dot" style="background:var(--seg-sys)"></i><span>系统提示词</span><span class="num">${formatTokens(ctx.sys)}</span>
-      <i class="dot" style="background:var(--seg-hist)"></i><span>携带历史（${ctx.included.length}/${ctx.totalMsgs} 条）</span><span class="num">${formatTokens(ctx.history)}</span>
+      ${ctx.hasCompaction ? `<i class="dot" style="background:var(--seg-cmp)"></i><span>压缩摘要（替代 ${ctx.archivedCount} 条${ctx.savedTokens ? '，省 ' + formatTokens(ctx.savedTokens) : ''}）</span><span class="num">${formatTokens(ctx.comp)}</span>` : ''}
+      <i class="dot" style="background:var(--seg-hist)"></i><span>携带历史（${ctx.includedActiveCount}/${ctx.totalMsgs} 条）</span><span class="num">${formatTokens(ctx.history)}</span>
       <i class="dot" style="background:var(--seg-inp)"></i><span>正在输入</span><span class="num">${formatTokens(ctx.input)}</span>
       <i class="dot seg res"></i><span>预留输出 (max_tokens)</span><span class="num">${formatTokens(ctx.reserve)}</span>
       <i></i><span><b>剩余可用额度</b></span><span class="num"><b>${free >= 0 ? formatTokens(free) : '-' + formatTokens(-free)}</b></span>
     </div>
     ${ctx.manualExcluded ? `<div class="ctx-alert warn">👁 已手动移出 ${ctx.manualExcluded} 条消息（可点击消息下方眼睛图标恢复）</div>` : ''}
-    ${ctx.trimmedByWindow ? `<div class="ctx-alert warn">⚠ 已自动截断最早的 ${ctx.trimmedByWindow} 条消息以适应窗口（半透明显示）</div>` : ''}
+    ${ctx.trimmedByWindow ? `<div class="ctx-alert warn">⚠ 已自动截断最早的 ${ctx.trimmedByWindow} 条消息以适应窗口（建议改用“压缩上下文”保留早期记忆）</div>` : ''}
     ${ctx.limitedByCount ? `<div class="ctx-alert warn">ℹ 受“携带历史条数”限制，排除了 ${ctx.limitedByCount} 条较早消息</div>` : ''}
-    ${ratio > 1 ? `<div class="ctx-alert danger">⛔ 预计超出上下文窗口 ${formatTokens(ctx.total - ctx.limit)} tokens，请求可能报错。可开启自动截断、移出长消息、调小 max_tokens 或新建对话。</div>`
-      : ratio > 0.8 ? '<div class="ctx-alert warn">⚠ 上下文额度占用已超 80%，建议精简历史或开启新对话。</div>' : ''}
+    ${ratio > 1 ? `<div class="ctx-alert danger">⛔ 预计超出上下文窗口 ${formatTokens(ctx.total - ctx.limit)} tokens，请求可能报错。建议点击上方“压缩上下文”浓缩早期历史，或调小 max_tokens。</div>`
+      : ratio > 0.8 ? '<div class="ctx-alert warn">⚠ 上下文额度占用已超 80%，可使用“压缩上下文”大幅节省 Token 且不丢关键背景。</div>' : ''}
     ${(lastUsage || sumPrompt || sumComp) ? `<div class="ctx-actual">
       ${lastUsage ? `<div>上次实际用量：输入 ${formatTokens(lastUsage.prompt)} · 输出 ${formatTokens(lastUsage.completion)} tokens</div>` : ''}
       ${(sumPrompt || sumComp) ? `<div>本对话累计真实消耗：输入 ${formatTokens(sumPrompt)} · 输出 ${formatTokens(sumComp)} · 共 ${formatTokens(sumPrompt + sumComp)} tokens</div>` : ''}
@@ -819,7 +914,7 @@ function composeText() {
 
 // ======================= 发送与生成 =======================
 async function send() {
-  if (state.generating) return;
+  if (state.generating || state.compacting) return;
   const conv = currentConv();
   const content = composeText();
   const images = state.attachments.filter((a) => a.kind === 'image').map((a) => a.data);
@@ -845,9 +940,6 @@ async function send() {
 async function generate(conv) {
   const provider = getProvider(conv.providerId);
   if (!provider) { toast('该对话的 API 提供商已被删除，请重新选择模型'); return; }
-  const ctx = computeContext(conv);
-  const history = ctx.included;
-  const systemText = expandPrompt(conv.systemPrompt, conv.model);
   const assistant = { id: uid(), role: 'assistant', content: '', reasoning: '', time: Date.now(), model: conv.model, pending: true };
   conv.messages.push(assistant);
   const controller = new AbortController();
@@ -859,6 +951,19 @@ async function generate(conv) {
   updateSendBtn();
 
   try {
+    if (conv.params.autoCompact) {
+      const preCtx = computeContext(conv);
+      if (preCtx.total / preCtx.limit >= 0.8) {
+        const didCompact = await maybeAutoCompactBeforeSend(conv, provider, assistant, controller.signal);
+        if (didCompact && currentConv() === conv) {
+          renderMessages(true);
+          updateMeter();
+        }
+      }
+    }
+    const ctx = computeContext(conv);
+    const history = ctx.included;
+    const systemText = expandPrompt(conv.systemPrompt, conv.model);
     const res = await sendChat({
       provider, model: conv.model, system: systemText, messages: history, params: conv.params, signal: controller.signal,
       onDelta: ({ content, reasoning }) => {
@@ -885,6 +990,7 @@ async function generate(conv) {
       assistant.error = msg;
     }
   } finally {
+    delete assistant.compactingHint;
     assistant.pending = false;
     assistant.duration = Date.now() - assistant.time;
     if (!assistant.reasoning) delete assistant.reasoning;
@@ -899,6 +1005,10 @@ async function generate(conv) {
 
 function stopGeneration() {
   state.generating?.controller.abort();
+}
+
+function stopCompaction() {
+  state.compacting?.controller.abort();
 }
 
 // ======================= 消息操作 =======================
@@ -917,13 +1027,21 @@ async function onMessageAction(act, msgEl) {
       toast(m.excluded ? '已将该消息移出上下文' : '已重新纳入上下文');
       break;
     case 'delete':
+      if (conv.compaction?.upToMsgId === m.id) {
+        conv.compaction.upToMsgId = idx > 0 ? conv.messages[idx - 1].id : null;
+      }
       conv.messages.splice(idx, 1);
       saveConvSoon(conv, 0); renderMessages(); updateMeter(); renderConvList();
       break;
     case 'regen': {
-      if (state.generating) return;
+      if (state.generating || state.compacting) return;
       conv.messages.splice(idx);
-      if (!conv.messages.some((x) => x.role === 'user' && !x.excluded)) {
+      if (conv.compaction?.upToMsgId) {
+        const upIdx = conv.messages.findIndex((x) => x.id === conv.compaction.upToMsgId);
+        if (upIdx < 0 || upIdx >= conv.messages.length - 1) conv.compaction = null;
+      }
+      const { active } = getCompactionSplit(conv);
+      if (!active.some((x) => x.role === 'user' && !x.excluded)) {
         saveConvSoon(conv, 0);
         renderMessages();
         updateMeter();
@@ -951,8 +1069,13 @@ async function onMessageAction(act, msgEl) {
       delete m.stopped;
       state.editingMsgId = null;
       if (act === 'edit-send') {
+        if (state.generating || state.compacting) return;
         m.excluded = false;
         conv.messages.splice(idx + 1);
+        if (conv.compaction?.upToMsgId) {
+          const upIdx = conv.messages.findIndex((x) => x.id === conv.compaction.upToMsgId);
+          if (upIdx < 0 || upIdx >= conv.messages.length - 1) conv.compaction = null;
+        }
         state.stick = true;
         await saveConvNow(conv);
         await generate(conv);
@@ -968,9 +1091,14 @@ async function onMessageAction(act, msgEl) {
 
 function exportChatMarkdown() {
   const conv = currentConv();
-  if (!conv?.messages.length) { toast('当前对话为空'); return; }
+  if (!conv?.messages.length && !conv?.summary?.content && !conv?.compaction?.summary) {
+    toast('当前对话为空');
+    return;
+  }
   let md = `# ${conv.title}\n\n> 模型：${conv.model} · 导出于 ${new Date().toLocaleString()}\n\n`;
   if (conv.systemPrompt?.trim()) md += `## 系统提示词\n\n${conv.systemPrompt}\n\n---\n\n`;
+  if (conv.summary?.content?.trim()) md += `## 📝 对话总结\n\n${conv.summary.content.trim()}\n\n---\n\n`;
+  if (conv.compaction?.summary?.trim()) md += `## 📦 上下文压缩摘要\n\n${conv.compaction.summary.trim()}\n\n---\n\n`;
   for (const m of conv.messages) {
     if (m.error) continue;
     const body = [m.images?.length ? `*[包含 ${m.images.length} 张图片]*` : '', m.content].filter(Boolean).join('\n\n');
@@ -1206,13 +1334,577 @@ async function importAll(file) {
       updatePlaceholder();
       saveSettings();
     }
-    if (currentConv() === state.draft && !state.draft.messages.length && state.convs.length) {
+    if (currentConv() === state.draft && !state.draft.messages.length && !state.draft.compaction && state.convs.length) {
       state.currentId = [...state.convs].sort((a, b) => b.updatedAt - a.updatedAt)[0].id;
     } else if (currentConv()) ensureTarget(currentConv());
     toast(`已导入 ${added} 个对话`);
     renderAll();
     renderProviders();
   } catch (e) { toast('导入失败：' + e.message); }
+}
+
+// ======================= 上下文压缩与对话总结 =======================
+const SUMMARY_PROMPTS = {
+  structured: {
+    name: '结构化纪要',
+    prompt: '请将整段对话整理为一份结构清晰的 Markdown 对话纪要，包含：\n1. **主题与背景**：核心诉求或探讨议题；\n2. **讨论脉络与关键分析**：重要推理步骤、方案对比或思路演进；\n3. **核心结论与最终方案**：明确达成的结论、关键参数/配置或交付成果；\n4. **后续建议**：可继续深入的方向或注意事项。',
+  },
+  bullets: {
+    name: '核心要点',
+    prompt: '请以极高信息密度提炼整段对话的核心要点（Markdown 格式）：\n- 先用 1~2 句话给出 **TL;DR 一句话总结**；\n- 再用精炼的分点列表列出全部关键事实、结论与重要细节（去除过程性寒暄与重复内容）。',
+  },
+  tech: {
+    name: '技术与代码复盘',
+    prompt: '请从工程与技术复盘视角总结本段对话（Markdown 格式），包含：\n1. **问题定义 / 需求目标**；\n2. **根因分析或技术选型**；\n3. **关键实现与变更点**（保留核心文件路径、函数签名、命令、配置项或关键代码片段）；\n4. **注意事项 / 边界条件与后续待优化项**。',
+  },
+  todos: {
+    name: '待办行动项',
+    prompt: '请从行动导向提炼本段对话（Markdown 格式），包含：\n1. **已确认决议**：已经敲定的方案与前提；\n2. **待办行动清单**：使用 `- [ ]` 任务列表列出具体可执行的下一步动作（可标注优先级或前置条件）；\n3. **待确认问题 / 潜在风险**。',
+  },
+};
+
+function validMessagesOf(conv) {
+  return (conv?.messages || []).filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
+}
+
+function formatTranscript(msgs) {
+  return msgs
+    .filter((m) => !m.excluded)
+    .map((m, idx) => {
+      const role = m.role === 'user' ? '用户' : `助手(${m.model || 'AI'})`;
+      const clean = (m.role === 'assistant' ? splitThink(m).content : m.content) || '';
+      const clipped = clean.length > 12000 ? clean.slice(0, 12000) + '\n…[单条过长已截断]' : clean;
+      const imgNote = m.images?.length ? `[附带 ${m.images.length} 张图片]\n` : '';
+      return `### #${idx + 1} ${role}\n${imgNote}${clipped}`;
+    })
+    .join('\n\n');
+}
+
+function populateModelPicker(sel, conv) {
+  const prev = sel.value;
+  sel.replaceChildren();
+  const ps = state.settings.providers;
+  if (!ps.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = '— 尚未配置 API —';
+    sel.append(o);
+    return;
+  }
+  for (const p of ps) {
+    const g = document.createElement('optgroup');
+    g.label = p.name;
+    const models = [...(p.models || [])];
+    if (conv?.providerId === p.id && conv.model && !models.includes(conv.model)) models.unshift(conv.model);
+    for (const m of models) {
+      const o = document.createElement('option');
+      o.value = `${p.id}${SEP}${m}`;
+      o.textContent = conv?.providerId === p.id && conv.model === m ? `${m}（当前对话）` : m;
+      g.append(o);
+    }
+    if (g.children.length) sel.append(g);
+  }
+  const curVal = conv?.providerId && conv.model ? `${conv.providerId}${SEP}${conv.model}` : '';
+  if (curVal && [...sel.options].some((o) => o.value === curVal)) sel.value = curVal;
+  else if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+}
+
+function getSelectedTarget(sel, conv) {
+  const v = sel?.value || '';
+  if (v.includes(SEP)) {
+    const [providerId, model] = v.split(SEP);
+    const provider = getProvider(providerId);
+    if (provider && model) return { provider, model };
+  }
+  if (conv) ensureTarget(conv);
+  const provider = getProvider(conv?.providerId);
+  return provider && conv?.model ? { provider, model: conv.model } : null;
+}
+
+function planCompaction(conv, keepCount) {
+  const validAll = validMessagesOf(conv);
+  const keep = Math.max(0, Math.round(Number(keepCount) || 0));
+  const compressCount = Math.max(0, validAll.length - keep);
+  const slice = validAll.slice(0, compressCount);
+  const kept = validAll.slice(compressCount);
+  const upToMsgId = slice.at(-1)?.id ?? null;
+  const toSummarize = slice.filter((m) => !m.excluded);
+  const sliceTokens = toSummarize.reduce((s, m) => s + messageTokens(m), 0);
+
+  const prev = conv?.compaction?.summary?.trim() ? conv.compaction : null;
+  const prevIdx = prev?.upToMsgId ? validAll.findIndex((m) => m.id === prev.upToMsgId) : -1;
+  let incremental = false;
+  let baseSummary = '';
+  let deltaMsgs = toSummarize;
+  let originalTokens = sliceTokens;
+
+  if (prev && compressCount > 0) {
+    if (!prev.upToMsgId) {
+      incremental = true;
+      baseSummary = prev.summary.trim();
+      deltaMsgs = toSummarize;
+      originalTokens = (prev.originalTokens || estimateTokens(baseSummary)) + sliceTokens;
+    } else if (prevIdx >= 0 && prevIdx < compressCount - 1) {
+      incremental = true;
+      baseSummary = prev.summary.trim();
+      deltaMsgs = validAll.slice(prevIdx + 1, compressCount).filter((m) => !m.excluded);
+      const deltaTok = deltaMsgs.reduce((s, m) => s + messageTokens(m), 0);
+      originalTokens = Math.max(sliceTokens, (prev.originalTokens || 0) + deltaTok);
+    }
+    if (incremental && !deltaMsgs.length) {
+      incremental = false;
+      deltaMsgs = toSummarize;
+    }
+  }
+  return {
+    validAll, keep, compressCount, slice, kept, upToMsgId,
+    toSummarize, incremental, baseSummary, deltaMsgs, originalTokens,
+  };
+}
+
+async function requestCompactionSummary({ provider, model, plan, focus = '', stream = true, signal, onProgress }) {
+  const sys = '你是一名专业的 AI 对话上下文压缩引擎。请将给定的早期对话高密度浓缩为供后续对话继续使用的「上下文记忆摘要」。\n' +
+    '核心要求：\n' +
+    '1. 完整保留用户的核心目标、偏好设定、约束条件、已确认的结论与决策；\n' +
+    '2. 精确保留关键技术细节：文件路径、函数/类名、接口协议、配置参数、关键代码片段、报错信息及已排除的错误方案；\n' +
+    '3. 明确列出当前进展与尚未解决的问题/下一步待办；\n' +
+    '4. 语言精炼、条理清晰（使用紧凑的 Markdown 分点），剔除寒暄、重复尝试与冗余铺垫，不编造对话中未出现的信息，直接输出摘要正文。';
+  const focusLine = focus.trim() ? `\n\n【用户特别指定需重点保留的内容】：${focus.trim()}` : '';
+  const userPrompt = plan.incremental
+    ? `以下是此前已归档的前序上下文摘要，以及后续新增的对话记录。请将二者合并更新为一份完整、连贯、去重后的最新上下文压缩摘要：${focusLine}\n\n<existing_summary>\n${plan.baseSummary}\n</existing_summary>\n\n<new_messages>\n${formatTranscript(plan.deltaMsgs)}\n</new_messages>`
+    : `请将以下早期对话记录浓缩为上下文压缩摘要：${focusLine}\n\n<conversation>\n${formatTranscript(plan.toSummarize)}\n</conversation>`;
+
+  const isReasoning = /^(o[134](-|$)|gpt-5|deepseek-reasoner)/i.test(model);
+  let raw = '';
+  await sendChat({
+    provider,
+    model,
+    system: sys,
+    messages: [{ role: 'user', content: userPrompt }],
+    params: {
+      ...mergeParams(),
+      temperature: 0.2,
+      max_tokens: 2048,
+      stream: stream !== false,
+      enabled: { temperature: !isReasoning, top_p: false, max_tokens: true, presence_penalty: false, frequency_penalty: false },
+    },
+    signal,
+    onDelta: ({ content, reasoning }) => {
+      if (content) raw += content;
+      onProgress?.({ ...splitThink({ content: raw }), apiReasoning: reasoning });
+    },
+  });
+  return (splitThink({ content: raw }).content || raw).trim();
+}
+
+async function maybeAutoCompactBeforeSend(conv, provider, assistant, signal) {
+  const { active } = getCompactionSplit(conv);
+  const activeValid = active.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
+  if (activeValid.length < 3) return false;
+  const keep = activeValid.length >= 5 ? 3 : 1;
+  let cutIdx = activeValid.length - keep - 1;
+  if (cutIdx > 0 && activeValid[cutIdx + 1]?.role === 'assistant') cutIdx -= 1;
+  if (cutIdx < 0) return false;
+  const boundaryMsg = activeValid[cutIdx];
+  const validAll = validMessagesOf(conv);
+  const bIdx = validAll.findIndex((m) => m.id === boundaryMsg.id);
+  if (bIdx < 0) return false;
+  const plan = planCompaction(conv, validAll.length - 1 - bIdx);
+  if (!plan.toSummarize.length && !plan.incremental) return false;
+
+  assistant.compactingHint = '📦 上下文占用已达 80%+，正在自动压缩早期历史…';
+  scheduleStreamRender(conv, assistant);
+  try {
+    const summary = await requestCompactionSummary({
+      provider, model: conv.model, plan, focus: '', stream: conv.params.stream, signal,
+    });
+    delete assistant.compactingHint;
+    if (!summary) return false;
+    conv.compaction = {
+      id: uid(), upToMsgId: plan.upToMsgId, summary,
+      compressedCount: plan.compressCount, originalTokens: plan.originalTokens,
+      model: conv.model, updatedAt: Date.now(),
+    };
+    await saveConvNow(conv);
+    toast('📦 已自动压缩早期上下文并释放窗口额度');
+    return true;
+  } catch (err) {
+    delete assistant.compactingHint;
+    if (err.name === 'AbortError') throw err;
+    toast('自动压缩未生效（' + (err.message || err) + '），已继续常规发送');
+    return false;
+  }
+}
+
+function openCompact(tab = 'compact', preserveBoundary = false) {
+  const conv = currentConv();
+  if (!conv) return;
+  populateModelPicker(els.cp_model, conv);
+  populateModelPicker(els.sm_model, conv);
+
+  const validAll = validMessagesOf(conv);
+  if (conv.compaction?.summary) {
+    const activeValid = getCompactionSplit(conv).active.filter((m) => !m.error && !m.pending && (m.content || m.images?.length));
+    els.cp_keep.value = (!preserveBoundary && activeValid.length > 4) ? 4 : activeValid.length;
+    els.cp_summary.value = conv.compaction.summary;
+  } else {
+    const n = validAll.length;
+    els.cp_keep.value = n >= 6 ? 4 : n >= 4 ? 2 : n === 3 ? 1 : 0;
+    els.cp_summary.value = '';
+  }
+  els.cp_status.textContent = '';
+  els.cp_status.className = 'status';
+  els.sm_status.textContent = '';
+  els.sm_status.className = 'status';
+
+  if (conv.summary?.style && SUMMARY_PROMPTS[conv.summary.style]) state.summaryStyle = conv.summary.style;
+  state.summaryEditing = false;
+  updateCompactPreview();
+  renderSummaryTab();
+  syncCompactBusyUI();
+  switchCompactTab(tab);
+  showModal(els.dlgCompact);
+}
+
+function switchCompactTab(tab) {
+  els.dlgCompact.querySelectorAll('[data-ctab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.ctab === tab)));
+  els.dlgCompact.querySelectorAll('[data-cpanel]').forEach((p) => { p.hidden = p.dataset.cpanel !== tab; });
+}
+
+function syncCompactBusyUI() {
+  const kind = state.compacting?.kind || null;
+  els.cp_generate.innerHTML = kind === 'compact' ? `${icon('stop')}停止生成` : `${icon('sparkle')}AI 生成压缩摘要`;
+  els.cp_generate.disabled = kind === 'summary';
+  els.sm_generate.innerHTML = kind === 'summary' ? `${icon('stop')}停止生成` : `${icon('sparkle')}AI 生成对话总结`;
+  els.sm_generate.disabled = kind === 'compact';
+  updateCompactPreview();
+  updateSummaryButtons();
+}
+
+function updateCompactPreview() {
+  const conv = currentConv();
+  if (!conv) return;
+  const plan = planCompaction(conv, els.cp_keep.value);
+  els.cp_keepChips.querySelectorAll('[data-keep]').forEach((b) => {
+    b.classList.toggle('active', Number(b.dataset.keep) === plan.keep);
+  });
+  const draftSummary = els.cp_summary.value.trim();
+  const sumTok = draftSummary
+    ? messageTokens({ role: 'user', content: COMPACT_PREFIX + draftSummary }) + messageTokens({ role: 'assistant', content: COMPACT_ACK })
+    : 0;
+  const saved = draftSummary ? Math.max(0, plan.originalTokens - sumTok) : 0;
+  els.cp_tokens.textContent = draftSummary
+    ? `（携带约 ${formatTokens(sumTok)} tokens${saved > 0 ? ` · 预计净省 ≈ ${formatTokens(saved)} tokens` : ''}）`
+    : '（支持 AI 自动提炼或手动输入背景摘要）';
+
+  const modeHint = plan.incremental
+    ? `增量合并模式：将在既有摘要基础上并入新增的 <b>${plan.deltaMsgs.length}</b> 条消息`
+    : `全量提炼模式：将压缩最早的 <b>${plan.compressCount}</b> 条消息（原约 <b>${formatTokens(plan.originalTokens)}</b> tokens）`;
+  els.cp_stats.innerHTML = plan.validAll.length
+    ? `当前对话共 <b>${plan.validAll.length}</b> 条有效消息 · 待压缩归档 <b>${plan.compressCount}</b> 条 · 保留近期原文 <b>${plan.kept.length}</b> 条<br><span class="dim">${modeHint}；原始消息仅折叠归档，随时可展开查阅或一键撤销恢复。</span>`
+    : (conv.compaction?.summary
+      ? `当前为携带前序摘要的对话（摘要约 <b>${formatTokens(sumTok)}</b> tokens）· 尚未发送新消息，可直接编辑下方背景摘要。`
+      : `当前对话暂无消息 · 你也可以直接在下方预先输入长背景摘要作为前置上下文。`);
+
+  els.cp_revoke.hidden = !conv.compaction?.summary;
+  els.cp_apply.disabled = !!state.compacting || !draftSummary;
+}
+
+async function runCompactAI() {
+  if (state.compacting?.kind === 'compact') { stopCompaction(); return; }
+  if (state.generating || state.compacting) { toast('请等待当前生成任务完成'); return; }
+  const conv = currentConv();
+  const target = getSelectedTarget(els.cp_model, conv);
+  if (!target) { openSettings('providers'); toast('请先配置 API 提供商与模型'); return; }
+  const plan = planCompaction(conv, els.cp_keep.value);
+  if (!plan.toSummarize.length && !plan.incremental) {
+    toast(plan.validAll.length ? '待压缩消息数为 0，请调小“保留最近几条消息”' : '当前对话暂无可压缩的消息');
+    return;
+  }
+
+  const controller = new AbortController();
+  state.compacting = { kind: 'compact', convId: conv.id, controller };
+  syncCompactBusyUI();
+  els.cp_status.textContent = '正在提炼压缩摘要…';
+  els.cp_status.className = 'status';
+  const prevVal = els.cp_summary.value;
+  els.cp_summary.value = '';
+
+  try {
+    const summary = await requestCompactionSummary({
+      provider: target.provider,
+      model: target.model,
+      plan,
+      focus: els.cp_focus.value,
+      stream: conv.params.stream,
+      signal: controller.signal,
+      onProgress: ({ content, reasoning, apiReasoning }) => {
+        if (content) {
+          els.cp_summary.value = content;
+          els.cp_status.textContent = '正在流式生成摘要…';
+          updateCompactPreview();
+        } else if (reasoning || apiReasoning) {
+          els.cp_status.textContent = '💭 模型正在思考提炼中…';
+        }
+      },
+    });
+    if (!summary) throw new Error('模型返回了空摘要');
+    els.cp_summary.value = summary;
+    els.cp_status.textContent = '✓ 已生成压缩摘要，确认无误后点击下方「应用压缩」即可生效';
+    els.cp_status.className = 'status ok';
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      if (!els.cp_summary.value.trim()) els.cp_summary.value = prevVal;
+      els.cp_status.textContent = '⏹ 已停止生成';
+      els.cp_status.className = 'status';
+    } else {
+      if (!els.cp_summary.value.trim()) els.cp_summary.value = prevVal;
+      els.cp_status.textContent = '✗ ' + (e.message || e);
+      els.cp_status.className = 'status err';
+    }
+  } finally {
+    state.compacting = null;
+    syncCompactBusyUI();
+    if (currentConv() === conv) renderMessages();
+  }
+}
+
+async function applyCompaction() {
+  const conv = currentConv();
+  if (!conv) return;
+  const summary = els.cp_summary.value.trim();
+  if (!summary) { toast('压缩摘要内容不能为空'); return; }
+  const plan = planCompaction(conv, els.cp_keep.value);
+  const selectedModel = getSelectedTarget(els.cp_model, conv)?.model || conv.model || '';
+  conv.compaction = {
+    id: conv.compaction?.id || uid(),
+    upToMsgId: plan.upToMsgId,
+    summary,
+    compressedCount: plan.upToMsgId ? plan.compressCount : (conv.compaction?.compressedCount || 0),
+    originalTokens: plan.upToMsgId ? plan.originalTokens : (conv.compaction?.originalTokens || 0),
+    model: selectedModel,
+    updatedAt: Date.now(),
+  };
+  conv.updatedAt = Date.now();
+  if (conv === state.draft) { state.convs.push(conv); state.draft = null; }
+  els.dlgCompact.close();
+  renderAll();
+  const ctx = computeContext(conv);
+  toast(ctx.savedTokens > 0 ? `📦 已应用上下文压缩，净省约 ${formatTokens(ctx.savedTokens)} tokens` : '📦 已应用上下文压缩摘要');
+  await saveConvNow(conv);
+}
+
+async function revokeCompaction() {
+  const conv = currentConv();
+  if (!conv?.compaction) return;
+  conv.compaction = null;
+  conv.updatedAt = Date.now();
+  if (els.dlgCompact.open) els.dlgCompact.close();
+  renderMessages();
+  updateMeter();
+  renderConvList();
+  toast('已撤销压缩，原始消息已完整恢复至上下文');
+  await saveConvNow(conv);
+}
+
+function extractSummaryParts(raw, allowTitle) {
+  if (!allowTitle) return { title: '', body: raw, waitingHeader: false };
+  const trimmed = raw.trimStart();
+  if (trimmed.startsWith('<!--') && !trimmed.includes('-->')) {
+    return { title: '', body: '', waitingHeader: true };
+  }
+  const m = /^\s*<!--\s*title:\s*([\s\S]*?)\s*-->\s*\n?/i.exec(raw);
+  if (m) {
+    const title = m[1].replace(/[\r\n]+/g, ' ').trim().replace(/^["'「『《]+|["'」』》]+$/g, '').slice(0, 36);
+    return { title, body: raw.slice(m[0].length).trimStart(), waitingHeader: false };
+  }
+  return { title: '', body: raw, waitingHeader: false };
+}
+
+function updateSummaryButtons() {
+  const conv = currentConv();
+  const hasText = !!(conv?.summary?.content?.trim());
+  const busy = !!state.compacting;
+  for (const id of ['sm_copy', 'sm_export', 'sm_toCompact', 'sm_fork']) els[id].disabled = !hasText || busy;
+  els.sm_toggleEdit.disabled = busy;
+  els.sm_toggleEdit.innerHTML = state.summaryEditing ? `${icon('eye')}预览渲染` : `${icon('edit')}编辑 Markdown`;
+}
+
+function renderSummaryTab() {
+  const conv = currentConv();
+  els.sm_styles.querySelectorAll('[data-style]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.style === state.summaryStyle);
+  });
+  const text = conv?.summary?.content || '';
+  if (document.activeElement !== els.sm_raw) els.sm_raw.value = text;
+  if (text.trim()) {
+    els.sm_view.innerHTML = renderMarkdown(text);
+    els.sm_view.classList.remove('empty');
+  } else {
+    els.sm_view.textContent = '尚未生成对话总结。选择上方模板风格后，点击「AI 生成对话总结」即可提炼完整纪要，也可直接点击「编辑 Markdown」手写总结。';
+    els.sm_view.classList.add('empty');
+  }
+  els.sm_view.hidden = state.summaryEditing;
+  els.sm_raw.hidden = !state.summaryEditing;
+  updateSummaryButtons();
+}
+
+async function runSummaryAI() {
+  if (state.compacting?.kind === 'summary') { stopCompaction(); return; }
+  if (state.generating || state.compacting) { toast('请等待当前生成任务完成'); return; }
+  const conv = currentConv();
+  const target = getSelectedTarget(els.sm_model, conv);
+  if (!target) { openSettings('providers'); toast('请先配置 API 提供商与模型'); return; }
+  const msgs = validMessagesOf(conv).filter((m) => !m.excluded);
+  const carrySummary = (!conv.compaction?.upToMsgId && conv.compaction?.summary?.trim()) ? conv.compaction.summary.trim() : '';
+  if (!msgs.length && !carrySummary) { toast('当前对话暂无可总结的消息'); return; }
+
+  const styleCfg = SUMMARY_PROMPTS[state.summaryStyle] || SUMMARY_PROMPTS.structured;
+  const wantTitle = els.sm_autoTitle.checked;
+  const sys = '你是一名专业的对话分析与知识整理助手。请严格忠于对话事实进行总结，切勿编造未提及的内容。\n' +
+    styleCfg.prompt +
+    (wantTitle ? '\n\n额外要求：请在回复的第一行严格按此格式输出一个精炼准确的对话标题（18 字以内，不要加引号或书名号）：\n<!-- title: 这里填写标题 -->\n从第二行起直接输出 Markdown 总结正文。' : '');
+
+  const parts = [];
+  if (carrySummary) parts.push(`<prior_summary>\n${carrySummary}\n</prior_summary>`);
+  if (msgs.length) parts.push(`<conversation>\n${formatTranscript(msgs)}\n</conversation>`);
+
+  const controller = new AbortController();
+  state.compacting = { kind: 'summary', convId: conv.id, controller };
+  state.summaryEditing = false;
+  syncCompactBusyUI();
+  els.sm_status.textContent = `正在生成「${styleCfg.name}」…`;
+  els.sm_status.className = 'status';
+
+  const prevSummary = conv.summary ? clone(conv.summary) : null;
+  const isReasoning = /^(o[134](-|$)|gpt-5|deepseek-reasoner)/i.test(target.model);
+  let raw = '';
+  let appliedTitle = '';
+
+  try {
+    await sendChat({
+      provider: target.provider,
+      model: target.model,
+      system: sys,
+      messages: [{ role: 'user', content: `请总结以下对话内容：\n\n${parts.join('\n\n')}` }],
+      params: {
+        ...mergeParams(),
+        temperature: 0.2,
+        max_tokens: 2048,
+        stream: conv.params.stream !== false,
+        enabled: { temperature: !isReasoning, top_p: false, max_tokens: true, presence_penalty: false, frequency_penalty: false },
+      },
+      signal: controller.signal,
+      onDelta: ({ content, reasoning }) => {
+        if (content) raw += content;
+        const thought = splitThink({ content: raw });
+        if (!thought.content && (thought.reasoning || reasoning)) {
+          els.sm_status.textContent = '💭 模型正在思考整理中…';
+          return;
+        }
+        const parsed = extractSummaryParts(thought.content, wantTitle);
+        if (parsed.title && parsed.title !== appliedTitle) {
+          appliedTitle = parsed.title;
+          conv.title = appliedTitle;
+          renderHeader();
+          renderConvList();
+        }
+        if (!parsed.waitingHeader && parsed.body) {
+          conv.summary = { content: parsed.body, style: state.summaryStyle, model: target.model, updatedAt: Date.now() };
+          renderSummaryTab();
+          els.sm_status.textContent = '正在流式生成总结…';
+        }
+      },
+    });
+    const finalClean = splitThink({ content: raw }).content || raw;
+    const finalParsed = extractSummaryParts(finalClean, wantTitle);
+    if (finalParsed.title && wantTitle) {
+      appliedTitle = finalParsed.title;
+      conv.title = appliedTitle;
+      renderHeader();
+      renderConvList();
+    }
+    const finalBody = finalParsed.body.trim();
+    if (!finalBody) throw new Error('模型返回了空总结');
+    conv.summary = { content: finalBody, style: state.summaryStyle, model: target.model, updatedAt: Date.now() };
+    conv.updatedAt = Date.now();
+    if (conv === state.draft) { state.convs.push(conv); state.draft = null; }
+    await saveConvNow(conv);
+    renderSummaryTab();
+    els.sm_status.textContent = `✓ 总结完成${appliedTitle ? ` · 标题已更新为「${appliedTitle}」` : ''}`;
+    els.sm_status.className = 'status ok';
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      if (!conv.summary?.content?.trim() && prevSummary) conv.summary = prevSummary;
+      els.sm_status.textContent = '⏹ 已停止生成';
+      els.sm_status.className = 'status';
+    } else {
+      if (!conv.summary?.content?.trim() && prevSummary) conv.summary = prevSummary;
+      els.sm_status.textContent = '✗ ' + (e.message || e);
+      els.sm_status.className = 'status err';
+    }
+    renderSummaryTab();
+  } finally {
+    state.compacting = null;
+    syncCompactBusyUI();
+    if (currentConv() === conv) renderMessages();
+  }
+}
+
+async function applySummaryAsCompaction() {
+  const conv = currentConv();
+  const summary = conv?.summary?.content?.trim();
+  if (!summary) { toast('请先生成或输入对话总结'); return; }
+  const validAll = validMessagesOf(conv);
+  const upToMsgId = validAll.at(-1)?.id ?? null;
+  const origTokens = validAll.filter((m) => !m.excluded).reduce((s, m) => s + messageTokens(m), 0);
+  conv.compaction = {
+    id: conv.compaction?.id || uid(),
+    upToMsgId,
+    summary,
+    compressedCount: validAll.length || conv.compaction?.compressedCount || 0,
+    originalTokens: origTokens || conv.compaction?.originalTokens || 0,
+    model: conv.summary?.model || conv.model || '',
+    updatedAt: Date.now(),
+  };
+  conv.updatedAt = Date.now();
+  if (conv === state.draft) { state.convs.push(conv); state.draft = null; }
+  els.dlgCompact.close();
+  renderAll();
+  toast('📦 已将对话总结应用为上下文压缩摘要');
+  await saveConvNow(conv);
+}
+
+async function forkWithSummary() {
+  const conv = currentConv();
+  const summary = conv?.summary?.content?.trim();
+  if (!summary) { toast('请先生成或输入对话总结'); return; }
+  const validAll = validMessagesOf(conv);
+  const origTokens = validAll.filter((m) => !m.excluded).reduce((s, m) => s + messageTokens(m), 0);
+  const nc = makeConv();
+  nc.providerId = conv.providerId;
+  nc.model = conv.model;
+  nc.systemPrompt = conv.systemPrompt;
+  nc.params = clone(conv.params);
+  nc.title = (conv.title && conv.title !== '新对话' ? `${conv.title.replace(/（续）$/, '')}（续）` : '续接对话').slice(0, 36);
+  nc.compaction = {
+    id: uid(),
+    upToMsgId: null,
+    summary,
+    compressedCount: validAll.length || conv.compaction?.compressedCount || 0,
+    originalTokens: origTokens || conv.compaction?.originalTokens || 0,
+    model: conv.summary?.model || conv.model || '',
+    updatedAt: Date.now(),
+  };
+  state.convs.push(nc);
+  state.currentId = nc.id;
+  state.editingMsgId = null;
+  state.stick = true;
+  els.dlgCompact.close();
+  renderAll();
+  els.input.focus();
+  toast('✨ 已携带对话总结开启新对话');
+  await saveConvNow(nc);
 }
 
 // ======================= 主题 / 布局 =======================
@@ -1251,6 +1943,9 @@ function bindEvents() {
   els.btnTogglePanel.addEventListener('click', togglePanel);
   els.btnClosePanel.addEventListener('click', togglePanel);
   els.scrim.addEventListener('click', closeMobile);
+  els.btnCompact.addEventListener('click', () => openCompact('compact'));
+  els.btnOpenCompact.addEventListener('click', () => openCompact('compact'));
+  els.btnOpenSummary.addEventListener('click', () => openCompact('summary'));
   els.btnExportChat.addEventListener('click', exportChatMarkdown);
   els.searchConv.addEventListener('input', renderConvList);
   els.selModel.addEventListener('change', onModelChange);
@@ -1290,6 +1985,9 @@ function bindEvents() {
     if (act === 'open-settings') { openSettings('providers'); return; }
     if (act === 'persona') { applySystemPrompt(a.dataset.prompt || ''); return; }
     if (act === 'edit-sys') { e.preventDefault(); openPanelTo('cardPrompt', els.sysPrompt); return; }
+    if (act === 'compact-open') { e.preventDefault(); openCompact('compact', true); return; }
+    if (act === 'compact-copy') { e.preventDefault(); copyText(currentConv()?.compaction?.summary || ''); return; }
+    if (act === 'compact-revoke') { e.preventDefault(); revokeCompaction(); return; }
     if (act === 'suggest') { els.input.value = a.textContent; autosize(); els.input.focus(); scheduleMeter(); return; }
     const msgEl = a.closest('.msg');
     if (msgEl) onMessageAction(act, msgEl);
@@ -1345,6 +2043,7 @@ function bindEvents() {
   });
   els.maxHistory.addEventListener('change', convParam((c, p) => { p.maxHistory = Math.max(0, Math.round(Number(els.maxHistory.value) || 0)); }));
   els.autoTrim.addEventListener('change', convParam((c, p) => { p.autoTrim = els.autoTrim.checked; }));
+  els.autoCompact.addEventListener('change', convParam((c, p) => { p.autoCompact = els.autoCompact.checked; }));
   els.streamToggle.addEventListener('change', convParam((c, p) => { p.stream = els.streamToggle.checked; }));
 
   // 面板：系统提示词
@@ -1514,12 +2213,78 @@ function bindEvents() {
   els.btnClearAll.addEventListener('click', async () => {
     if (!confirm('确定清空所有对话？此操作不可撤销（建议先导出备份）。')) return;
     stopGeneration();
+    stopCompaction();
     await db.clear();
     state.convs = [];
     state.draft = null;
     newChat();
     toast('已清空所有对话');
   });
+
+  // 上下文压缩与对话总结对话框
+  els.dlgCompact.addEventListener('click', (e) => {
+    const tab = e.target.closest('[data-ctab]');
+    if (tab) switchCompactTab(tab.dataset.ctab);
+  });
+  els.dlgCompact.addEventListener('close', () => {
+    if (state.compacting) stopCompaction();
+    els.dlgCompact.returnValue = '';
+  });
+  els.cp_keep.addEventListener('input', () => {
+    const n = Math.max(0, Math.round(Number(els.cp_keep.value) || 0));
+    if (String(n) !== els.cp_keep.value && els.cp_keep.value !== '') els.cp_keep.value = n;
+    updateCompactPreview();
+  });
+  els.cp_keepChips.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-keep]');
+    if (!b) return;
+    els.cp_keep.value = b.dataset.keep;
+    updateCompactPreview();
+  });
+  els.cp_summary.addEventListener('input', updateCompactPreview);
+  els.cp_generate.addEventListener('click', runCompactAI);
+  els.cp_apply.addEventListener('click', applyCompaction);
+  els.cp_revoke.addEventListener('click', revokeCompaction);
+
+  els.sm_styles.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-style]');
+    if (!b) return;
+    state.summaryStyle = b.dataset.style;
+    renderSummaryTab();
+  });
+  els.sm_generate.addEventListener('click', runSummaryAI);
+  els.sm_toggleEdit.addEventListener('click', () => {
+    state.summaryEditing = !state.summaryEditing;
+    renderSummaryTab();
+    if (state.summaryEditing) els.sm_raw.focus();
+  });
+  els.sm_raw.addEventListener('input', () => {
+    const conv = currentConv();
+    if (!conv) return;
+    conv.summary = {
+      content: els.sm_raw.value,
+      style: state.summaryStyle,
+      model: conv.summary?.model || conv.model || '',
+      updatedAt: Date.now(),
+    };
+    if (conv === state.draft && els.sm_raw.value.trim()) { state.convs.push(conv); state.draft = null; renderConvList(); }
+    saveConvSoon(conv, 500);
+    updateSummaryButtons();
+  });
+  els.sm_copy.addEventListener('click', () => {
+    const text = currentConv()?.summary?.content?.trim();
+    if (text) copyText(text);
+  });
+  els.sm_export.addEventListener('click', () => {
+    const conv = currentConv();
+    const text = conv?.summary?.content?.trim();
+    if (!text) return;
+    const md = `# ${conv.title} — 对话总结\n\n> 生成于 ${new Date().toLocaleString()}\n\n${text}\n`;
+    const safeName = (conv.title || 'summary').replace(/[\\/:*?"<>|]/g, '_').trim() || 'summary';
+    download(`${safeName}-总结.md`, md, 'text/markdown');
+  });
+  els.sm_toCompact.addEventListener('click', applySummaryAsCompaction);
+  els.sm_fork.addEventListener('click', forkWithSummary);
 
   // 提示词库
   els.promptList.addEventListener('click', (e) => {

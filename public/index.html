@@ -43,6 +43,7 @@
         <button class="pill-btn" id="topTempBtn" type="button" title="当前温度控制（点击调整）">🌡 0.7</button>
         <button class="pill-btn" id="topCtxBtn" type="button" title="上下文窗口占用（点击查看明细）">📊 0%</button>
       </div>
+      <button class="icon-btn" id="btnCompact" type="button" aria-label="上下文压缩与总结" title="上下文压缩与对话总结"><span data-icon="compress"></span></button>
       <button class="icon-btn" id="btnExportChat" type="button" aria-label="导出为 Markdown" title="导出为 Markdown"><span data-icon="download"></span></button>
       <button class="icon-btn" id="btnTogglePanel" type="button" aria-label="切换参数面板" title="参数面板"><span data-icon="sliders"></span></button>
     </header>
@@ -58,7 +59,7 @@
           <input type="file" id="fileInput" multiple hidden>
           <div class="meter" id="meter" title="点击查看上下文窗口额度明细">
             <div class="meter-bar" id="meterBar">
-              <i class="seg sys"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i>
+              <i class="seg sys"></i><i class="seg cmp"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i>
             </div>
             <span class="meter-text" id="meterText"></span>
           </div>
@@ -79,6 +80,10 @@
       <section class="card" id="cardCtx">
         <h3>上下文窗口额度</h3>
         <div class="ctx-detail" id="ctxDetail"></div>
+        <div class="row-btns" style="margin-bottom:.85em">
+          <button class="btn sm primary" id="btnOpenCompact" type="button"><span data-icon="compress"></span>压缩上下文</button>
+          <button class="btn sm" id="btnOpenSummary" type="button"><span data-icon="sparkle"></span>总结对话</button>
+        </div>
         <label class="field">
           <span>窗口大小 (tokens)</span>
           <input class="input" id="ctxWindow" type="number" min="512" step="1">
@@ -96,6 +101,7 @@
           <input class="input" id="maxHistory" type="number" min="0" step="1">
         </label>
         <label class="check"><input type="checkbox" id="autoTrim"> 超出窗口时自动截断最早的消息</label>
+        <label class="check"><input type="checkbox" id="autoCompact"> 占用超 80% 时发送前自动 AI 压缩早期历史</label>
       </section>
 
       <section class="card" id="cardPrompt">
@@ -268,6 +274,87 @@
         </div>
         <p class="hint" id="pr_defaultHint"></p>
       </div>
+    </div>
+  </div>
+</dialog>
+
+<!-- 上下文压缩与对话总结 -->
+<dialog class="dlg dlg-wide" id="dlgCompact" aria-labelledby="dlgCompactTitle" closedby="any">
+  <div class="dlg-head">
+    <h2 id="dlgCompactTitle">上下文压缩与总结</h2>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-ctab="compact" aria-selected="true">📦 上下文压缩</button>
+      <button type="button" role="tab" data-ctab="summary" aria-selected="false">📝 对话总结</button>
+    </div>
+    <form method="dialog"><button class="icon-btn" aria-label="关闭"><span data-icon="x"></span></button></form>
+  </div>
+
+  <div class="dlg-body" data-cpanel="compact">
+    <div class="compact-stats" id="cp_stats"></div>
+    <div class="grid2">
+      <label class="field">
+        <span>保留最近几条消息不压缩 <small>(保留近期原文以维持连贯)</small></span>
+        <input class="input" id="cp_keep" type="number" min="0" step="1" value="4">
+      </label>
+      <label class="field">
+        <span>用于生成压缩的模型 <small>(可选轻量模型省成本)</small></span>
+        <select class="input" id="cp_model"></select>
+      </label>
+    </div>
+    <div class="chips" id="cp_keepChips">
+      <button type="button" data-keep="0">全部压缩 (0)</button>
+      <button type="button" data-keep="2">保留 2 条</button>
+      <button type="button" data-keep="4">保留 4 条</button>
+      <button type="button" data-keep="6">保留 6 条</button>
+      <button type="button" data-keep="8">保留 8 条</button>
+    </div>
+    <label class="field">
+      <span>压缩侧重点 <small>(可选，告诉 AI 重点保留哪些信息)</small></span>
+      <input class="input" id="cp_focus" placeholder="例如：保留所有文件路径、函数签名、配置参数与未解决的报错">
+    </label>
+    <div class="row-btns" style="margin-bottom:.7em">
+      <button class="btn sm primary" id="cp_generate" type="button"><span data-icon="sparkle"></span>AI 生成压缩摘要</button>
+      <span class="status" id="cp_status"></span>
+    </div>
+    <label class="field">
+      <span>压缩摘要内容 <small class="dim" id="cp_tokens"></small></span>
+      <textarea class="input" id="cp_summary" rows="8" placeholder="点击上方“AI 生成压缩摘要”，也可直接在此手写或修改前文摘要。应用后，原早期消息将折叠归档（不丢失），后续请求仅发送本摘要＋最近保留消息。"></textarea>
+    </label>
+    <div class="row-btns">
+      <button class="btn primary" id="cp_apply" type="button"><span data-icon="check"></span>应用压缩到当前对话</button>
+      <button class="btn danger" id="cp_revoke" type="button" hidden><span data-icon="trash"></span>撤销压缩（恢复原消息）</button>
+    </div>
+  </div>
+
+  <div class="dlg-body" data-cpanel="summary" hidden>
+    <div class="grid2">
+      <div class="field">
+        <span>总结模板风格</span>
+        <div class="chips" id="sm_styles" style="margin-bottom:0">
+          <button type="button" data-style="structured" class="active">📋 结构化纪要</button>
+          <button type="button" data-style="bullets">🎯 核心要点</button>
+          <button type="button" data-style="tech">💻 技术与代码复盘</button>
+          <button type="button" data-style="todos">✅ 待办行动项</button>
+        </div>
+      </div>
+      <label class="field">
+        <span>用于生成总结的模型</span>
+        <select class="input" id="sm_model"></select>
+      </label>
+    </div>
+    <label class="check"><input type="checkbox" id="sm_autoTitle" checked> 同时根据总结内容智能生成并更新对话标题</label>
+    <div class="row-btns" style="margin-bottom:.7em">
+      <button class="btn sm primary" id="sm_generate" type="button"><span data-icon="sparkle"></span>AI 生成对话总结</button>
+      <button class="btn sm" id="sm_toggleEdit" type="button"><span data-icon="edit"></span>编辑 Markdown</button>
+      <span class="status" id="sm_status"></span>
+    </div>
+    <div class="summary-box md" id="sm_view"></div>
+    <textarea class="input" id="sm_raw" rows="10" hidden placeholder="在此查看或编辑对话总结 Markdown…"></textarea>
+    <div class="row-btns" style="margin-top:.8em">
+      <button class="btn sm" id="sm_copy" type="button"><span data-icon="copy"></span>复制总结</button>
+      <button class="btn sm" id="sm_export" type="button"><span data-icon="download"></span>导出总结 (.md)</button>
+      <button class="btn sm" id="sm_toCompact" type="button"><span data-icon="compress"></span>应用为上下文压缩</button>
+      <button class="btn sm primary" id="sm_fork" type="button"><span data-icon="plus"></span>携带总结开启新对话</button>
     </div>
   </div>
 </dialog>
