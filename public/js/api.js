@@ -1,4 +1,5 @@
 // 多协议 API 适配层：OpenAI 兼容 / Anthropic / Google Gemini
+import { WEB_SEARCH_TOOL_OPENAI, WEB_SEARCH_TOOL_ANTHROPIC, searchWeb } from './tools.js';
 export const PROVIDER_TYPES = {
   openai: 'OpenAI 兼容协议',
   anthropic: 'Anthropic (Claude)',
@@ -193,6 +194,12 @@ function normalizeTurns(messages) {
 
 // ---------------- OpenAI 兼容 ----------------
 function toOpenAIMessage(m) {
+  if (m.role === 'tool') {
+    return { role: 'tool', tool_call_id: m.tool_call_id, content: m.content || '' };
+  }
+  if (m.role === 'assistant' && m.tool_calls) {
+    return { role: 'assistant', content: m.content || null, tool_calls: m.tool_calls };
+  }
   if (m.role === 'user' && m.images?.length) {
     return {
       role: 'user',
@@ -205,16 +212,20 @@ function toOpenAIMessage(m) {
   return { role: m.role, content: m.content || '' };
 }
 
-async function chatOpenAI({ provider, model, system, messages, params, signal, onDelta }) {
+async function chatOpenAI({ provider, model, system, messages, params, signal, onDelta, depth = 0 }) {
   const base = openaiBase(provider);
   if (!base) throw new Error('请先在设置中填写 API 地址 (Base URL)');
   const e = params.enabled;
   const isOpenAIReasoning = /^(o[134](-|$)|gpt-5)/i.test(model) && /openai\.com/i.test(base);
+  const allowTools = !!params.webSearch && depth < 3;
   const body = {
     model,
     messages: [...(system?.trim() ? [{ role: 'system', content: system }] : []), ...messages.map(toOpenAIMessage)],
     stream: !!params.stream,
   };
+  if (allowTools) {
+    body.tools = [WEB_SEARCH_TOOL_OPENAI];
+  }
   if (e.temperature && !isOpenAIReasoning) body.temperature = params.temperature;
   if (e.top_p && !isOpenAIReasoning) body.top_p = params.top_p;
   if (e.max_tokens) {
@@ -234,24 +245,121 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
   await ensureOk(res);
 
   const toUsage = (u) => (u ? { prompt: u.prompt_tokens, completion: u.completion_tokens } : null);
+
   if (!params.stream) {
     const j = await res.json();
     const msg = j.choices?.[0]?.message ?? {};
+    if (msg.tool_calls?.length && allowTools) {
+      const toolCall = msg.tool_calls[0];
+      if (toolCall.function?.name === 'web_search') {
+        let query = '';
+        try { query = JSON.parse(toolCall.function.arguments || '{}').query || ''; }
+        catch { query = toolCall.function.arguments || ''; }
+        if (query) {
+          onDelta({ searchStatus: { status: 'searching', query } });
+          const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
+          onDelta({
+            searchStatus: { status: 'done', query, count: sRes.results.length },
+            searchSources: sRes.results,
+            searchQueries: [query]
+          });
+          const followMessages = [
+            ...messages,
+            { role: 'assistant', content: msg.content || null, tool_calls: msg.tool_calls },
+            { role: 'tool', tool_call_id: toolCall.id, content: sRes.formattedText }
+          ];
+          return chatOpenAI({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
+        }
+      }
+    }
     onDelta({ content: msg.content ?? '', reasoning: msg.reasoning_content ?? msg.reasoning ?? '' });
     return { usage: toUsage(j.usage), finish: j.choices?.[0]?.finish_reason };
   }
+
   let usage = null;
   let finish = null;
+  const accToolCalls = [];
+  let accContent = '';
+  let accReasoning = '';
+
   for await (const data of sse(res)) {
     if (data === '[DONE]') break;
     const j = parseJSON(data);
     if (!j) continue;
     if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
     const c = j.choices?.[0];
-    if (c?.delta) onDelta({ content: c.delta.content ?? '', reasoning: c.delta.reasoning_content ?? c.delta.reasoning ?? '' });
+    if (c?.delta) {
+      const deltaContent = c.delta.content ?? '';
+      const deltaReasoning = c.delta.reasoning_content ?? c.delta.reasoning ?? '';
+      if (deltaContent) accContent += deltaContent;
+      if (deltaReasoning) accReasoning += deltaReasoning;
+      if (deltaContent || deltaReasoning) {
+        onDelta({ content: deltaContent, reasoning: deltaReasoning });
+      }
+      if (c.delta.tool_calls) {
+        for (const tc of c.delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          if (!accToolCalls[idx]) {
+            accToolCalls[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
+          }
+          if (tc.id) accToolCalls[idx].id = tc.id;
+          if (tc.function?.name) accToolCalls[idx].function.name += tc.function.name;
+          if (tc.function?.arguments) accToolCalls[idx].function.arguments += tc.function.arguments;
+        }
+      }
+    }
     if (c?.finish_reason) finish = c.finish_reason;
     if (j.usage) usage = toUsage(j.usage);
   }
+
+  // 检查是否触发了 web_search 联网搜索工具
+  const validTool = accToolCalls.find((tc) => tc?.function?.name === 'web_search');
+  if (validTool && allowTools) {
+    let query = '';
+    try {
+      const parsed = JSON.parse(validTool.function.arguments || '{}');
+      query = parsed.query || '';
+    } catch {
+      query = validTool.function.arguments || '';
+    }
+    if (query) {
+      onDelta({ searchStatus: { status: 'searching', query } });
+      const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
+      onDelta({
+        searchStatus: { status: 'done', query, count: sRes.results.length },
+        searchSources: sRes.results,
+        searchQueries: [query]
+      });
+      const followMessages = [
+        ...messages,
+        {
+          role: 'assistant',
+          content: accContent || null,
+          tool_calls: accToolCalls.map((tc, i) => ({
+            id: tc.id || `call_${i}_${Date.now()}`,
+            type: 'function',
+            function: { name: tc.function.name, arguments: tc.function.arguments }
+          }))
+        },
+        {
+          role: 'tool',
+          tool_call_id: validTool.id || `call_${Date.now()}`,
+          content: sRes.formattedText
+        }
+      ];
+      const nextRes = await chatOpenAI({
+        provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
+      });
+      if (usage && nextRes?.usage) {
+        nextRes.usage = {
+          prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
+          completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
+        };
+      }
+      return nextRes;
+    }
+  }
+
   return { usage, finish };
 }
 
@@ -265,20 +373,35 @@ function anthropicHeaders(provider) {
   };
 }
 
-async function chatAnthropic({ provider, model, system, messages, params, signal, onDelta }) {
+function toAnthropicMessage(m) {
+  if (m.role === 'tool_result' || m.role === 'tool') {
+    return {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: m.tool_use_id || m.tool_call_id, content: m.content || '' }]
+    };
+  }
+  if (m.role === 'assistant' && m.anthropicContent) {
+    return { role: 'assistant', content: m.anthropicContent };
+  }
+  return {
+    role: m.role,
+    content: [
+      ...(m.images || []).map((u) => { const { mime, data } = dataUrlParts(u); return { type: 'image', source: { type: 'base64', media_type: mime, data } }; }),
+      ...(m.content ? [{ type: 'text', text: m.content }] : []),
+    ]
+  };
+}
+
+async function chatAnthropic({ provider, model, system, messages, params, signal, onDelta, depth = 0 }) {
   const e = params.enabled;
+  const allowTools = !!params.webSearch && depth < 3;
   const body = {
     model,
     max_tokens: e.max_tokens ? params.max_tokens : 4096,
     stream: !!params.stream,
-    messages: normalizeTurns(messages).map((m) => ({
-      role: m.role,
-      content: [
-        ...m.images.map((u) => { const { mime, data } = dataUrlParts(u); return { type: 'image', source: { type: 'base64', media_type: mime, data } }; }),
-        ...(m.content ? [{ type: 'text', text: m.content }] : []),
-      ],
-    })),
+    messages: normalizeTurns(messages).map(toAnthropicMessage),
   };
+  if (allowTools) body.tools = [WEB_SEARCH_TOOL_ANTHROPIC];
   if (system?.trim()) body.system = system;
   // Claude 4.x 不允许同时传 temperature 与 top_p
   if (e.temperature) body.temperature = Math.min(params.temperature, 1);
@@ -293,15 +416,42 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
     const j = await res.json();
     let content = '';
     let reasoning = '';
+    const toolUses = [];
     for (const b of j.content || []) {
       if (b.type === 'text') content += b.text;
       else if (b.type === 'thinking') reasoning += b.thinking;
+      else if (b.type === 'tool_use') toolUses.push(b);
+    }
+    if (toolUses.length && allowTools) {
+      const tu = toolUses[0];
+      let query = '';
+      try { query = (typeof tu.input === 'object' ? tu.input?.query : JSON.parse(tu.input || '{}').query) || ''; } catch { query = tu.input || ''; }
+      if (query) {
+        onDelta({ searchStatus: { status: 'searching', query } });
+        const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
+        onDelta({
+          searchStatus: { status: 'done', query, count: sRes.results.length },
+          searchSources: sRes.results,
+          searchQueries: [query]
+        });
+        const followMessages = [
+          ...messages,
+          { role: 'assistant', anthropicContent: j.content },
+          { role: 'tool_result', tool_use_id: tu.id, content: sRes.formattedText }
+        ];
+        return chatAnthropic({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
+      }
     }
     onDelta({ content, reasoning });
     return { usage: j.usage ? { prompt: j.usage.input_tokens, completion: j.usage.output_tokens } : null, finish: j.stop_reason };
   }
+
   const usage = { prompt: 0, completion: 0 };
   let finish = null;
+  let accContent = '';
+  const toolUses = [];
+  let currentToolUse = null;
+
   for await (const data of sse(res)) {
     const j = parseJSON(data);
     if (!j) continue;
@@ -311,9 +461,26 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
         usage.prompt = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
         break;
       }
+      case 'content_block_start':
+        if (j.content_block?.type === 'tool_use') {
+          currentToolUse = { id: j.content_block.id, name: j.content_block.name, input: '' };
+        }
+        break;
       case 'content_block_delta':
-        if (j.delta?.type === 'text_delta') onDelta({ content: j.delta.text });
-        else if (j.delta?.type === 'thinking_delta') onDelta({ reasoning: j.delta.thinking });
+        if (j.delta?.type === 'text_delta') {
+          accContent += j.delta.text;
+          onDelta({ content: j.delta.text });
+        } else if (j.delta?.type === 'thinking_delta') {
+          onDelta({ reasoning: j.delta.thinking });
+        } else if (j.delta?.type === 'input_json_delta' && currentToolUse) {
+          currentToolUse.input += j.delta.partial_json;
+        }
+        break;
+      case 'content_block_stop':
+        if (currentToolUse) {
+          toolUses.push(currentToolUse);
+          currentToolUse = null;
+        }
         break;
       case 'message_delta':
         if (j.usage?.output_tokens != null) usage.completion = j.usage.output_tokens;
@@ -323,6 +490,44 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
         throw new Error(j.error?.message || 'Anthropic 流式错误');
     }
   }
+
+  if (toolUses.length && allowTools) {
+    const tu = toolUses[0];
+    let query = '';
+    try { query = JSON.parse(tu.input || '{}').query || ''; } catch { query = tu.input || ''; }
+    if (query) {
+      onDelta({ searchStatus: { status: 'searching', query } });
+      const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
+      onDelta({
+        searchStatus: { status: 'done', query, count: sRes.results.length },
+        searchSources: sRes.results,
+        searchQueries: [query]
+      });
+      const anthropicContent = [];
+      if (accContent) anthropicContent.push({ type: 'text', text: accContent });
+      for (const t of toolUses) {
+        let parsed = {};
+        try { parsed = JSON.parse(t.input || '{}'); } catch {}
+        anthropicContent.push({ type: 'tool_use', id: t.id, name: t.name, input: parsed });
+      }
+      const followMessages = [
+        ...messages,
+        { role: 'assistant', anthropicContent },
+        { role: 'tool_result', tool_use_id: tu.id, content: sRes.formattedText }
+      ];
+      const nextRes = await chatAnthropic({
+        provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
+      });
+      if (usage && nextRes?.usage) {
+        nextRes.usage = {
+          prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
+          completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
+        };
+      }
+      return nextRes;
+    }
+  }
+
   return { usage, finish };
 }
 
@@ -346,6 +551,9 @@ async function chatGemini({ provider, model, system, messages, params, signal, o
     generationConfig,
   };
   if (system?.trim()) body.systemInstruction = { parts: [{ text: system }] };
+  if (params.webSearch) {
+    body.tools = [{ googleSearch: {} }];
+  }
 
   const name = (model || '').replace(/^models\//, '').trim();
   if (!name) throw new Error('请先选择或输入模型名称');
@@ -368,6 +576,22 @@ async function chatGemini({ provider, model, system, messages, params, signal, o
       if (!p.text) continue;
       if (p.thought) onDelta({ reasoning: p.text });
       else onDelta({ content: p.text });
+    }
+    const gm = cand?.groundingMetadata;
+    if (gm) {
+      const queries = gm.webSearchQueries || [];
+      const sources = (gm.groundingChunks || []).map((ch) => ch.web ? ({
+        title: ch.web.title || ch.web.uri,
+        url: ch.web.uri,
+        snippet: ''
+      }) : null).filter(Boolean);
+      if (queries.length || sources.length) {
+        onDelta({
+          searchStatus: { status: 'done', query: queries.join(', '), count: sources.length },
+          searchSources: sources,
+          searchQueries: queries
+        });
+      }
     }
     if (cand?.finishReason) finish = cand.finishReason;
     const u = j.usageMetadata;

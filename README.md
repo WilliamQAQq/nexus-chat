@@ -8,6 +8,14 @@
 
 [English Documentation](#english-documentation) · [中文文档](#中文文档)
 
+8. **AI Web Search & Knowledge Retrieval (联网搜索与工具调用)**:
+   - **Autonomous Tool Calling Loop**: OpenAI-compatible and Claude models autonomously invoke `web_search({ query: string })` when encountering unfamiliar, recent, or factual questions.
+   - **Google Gemini Native Grounding**: Leverages Gemini's official `googleSearch` grounding tool for real-time live Google results without needing any search keys.
+   - **Zero-Friction Free Multi-engine Search**: Built-in Wikipedia + DuckDuckGo Instant Answers fallback provides 100% free, zero-config real-time search even when hosted statically on GitHub Pages.
+   - **Local Bing Fast Search**: When running locally with `server.js`, `/api/search` queries live search indexes with full snippet and URL decoding.
+   - **Configurable Search Providers**: Supports optional API keys for Tavily AI Search, Google Serper, Brave Search, Jina AI, or custom search endpoints in Settings.
+   - **Rich Citation UI**: Collapsible search result cards and clickable reference pills `[1] Title` under assistant replies.
+
 ---
 
 <h2 id="english-documentation">English Documentation</h2>
@@ -78,6 +86,14 @@ Nexus Chat is a pure modern frontend Web AI chat workspace (with an optional zer
    - **Built-in Presets**: 1-click load presets to strip `<think>` tags, convert `*action descriptions*` into clean italics, and compress redundant blank lines.
    - **Interactive Live Preview**: Real-time regex tester preview with instant match counters.
    - **Import & Export**: Fully compatible with SillyTavern regex script JSON formatting.
+
+8. **AI Web Search & Knowledge Retrieval (联网搜索与工具调用)**:
+   - **Autonomous Tool Calling Loop**: OpenAI-compatible and Claude models autonomously invoke `web_search({ query: string })` when encountering unfamiliar, recent, or factual questions.
+   - **Google Gemini Native Grounding**: Leverages Gemini's official `googleSearch` grounding tool for real-time live Google results without needing any search keys.
+   - **Zero-Friction Free Multi-engine Search**: Built-in Wikipedia + DuckDuckGo Instant Answers fallback provides 100% free, zero-config real-time search even when hosted statically on GitHub Pages.
+   - **Local Bing Fast Search**: When running locally with `server.js`, `/api/search` queries live search indexes with full snippet and URL decoding.
+   - **Configurable Search Providers**: Supports optional API keys for Tavily AI Search, Google Serper, Brave Search, Jina AI, or custom search endpoints in Settings.
+   - **Rich Citation UI**: Collapsible search result cards and clickable reference pills `[1] Title` under assistant replies.
 
 ---
 
@@ -166,3 +182,11 @@ Nexus Chat is a pure modern frontend Web AI chat workspace (with an optional zer
 - **内置常用预设**：一键加载常用脚本（如过滤 `<think>` 思考链标签、将 `*动作描写*` 渲染为标准斜体、压缩多余空行等）。
 - **实时可视化测试面板**：边写边测，即时显示替换后预览效果与匹配次数统计。
 - **导入与导出**：完全兼容 SillyTavern 正则脚本 JSON 格式。
+
+### 9. AI 联网搜索与工具调用 (Web Search & Tool Calling)
+- **智能函数调用循环 (Autonomous Tool Calling Loop)**：OpenAI 兼容协议模型（如 GPT-4o、DeepSeek-V3/R1、Qwen、GLM）与 Claude 模型遇到未知或时效性知识时，自动调用 `web_search` 函数检索实时互联网，并将结果注入上下文生成最新回答。
+- **Google Gemini 原生 Google Grounding**：Gemini 模型直接调用官方 `googleSearch` 原生检索工具，免配置、免 API Key，直接获取谷歌实时检索结果与权威网页引用。
+- **免配置双源免费客户端检索**：静态部署于 GitHub Pages 时，默认自动并行检索维基百科 (中/英文) 与 DuckDuckGo，0 门槛、0 费用获取高质量事实内容。
+- **本地服务端高速 Bing 搜索**：本地运行 `server.js` 时，内置 `/api/search` 接口提供快速实时网页检索与真实 URL 解析。
+- **支持商业/专业搜索 API**：在设置中可自由配置 Tavily AI Search、Google Serper、Brave Search、Jina AI 或自定义 Search API。
+- **直观的搜索状态与来源引用展示**：输入框下方一键开关联网状态（支持高亮指示）；生成时实时显示检索动画与关键词；回复内提供可折叠搜索详情卡片与底部药丸式来源跳转外链。

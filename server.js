@@ -82,6 +82,61 @@ async function handleProxy(req, res) {
   }
 }
 
+async function searchBing(query) {
+  const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+    }
+  });
+  if (!res.ok) throw new Error(`Bing returned ${res.status}`);
+  const html = await res.text();
+  const results = [];
+  const regex = /<h2><a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>[\s\S]*?<div class="b_caption">[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/gi;
+  let m;
+  while ((m = regex.exec(html)) !== null && results.length < 6) {
+    let rawUrl = m[1].replace(/&amp;/g, '&');
+    try {
+      const u = new URL(rawUrl);
+      const p = u.searchParams.get('u');
+      if (p && p.startsWith('a1')) {
+        rawUrl = Buffer.from(p.slice(2), 'base64').toString('utf8');
+      }
+    } catch {}
+    const title = m[2].replace(/<[^>]+>/g, '').trim();
+    const snippet = m[3].replace(/<[^>]+>/g, '').trim();
+    if (title && snippet) results.push({ title, snippet, url: rawUrl });
+  }
+  return results;
+}
+
+async function handleSearch(req, res) {
+  const q = new URL(req.url, 'http://localhost').searchParams.get('q');
+  if (!q) {
+    res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ error: { message: '缺少搜索关键词 q' } }));
+    return;
+  }
+  try {
+    const results = await searchBing(q);
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-cache',
+      'access-control-allow-origin': '*'
+    });
+    res.end(JSON.stringify({ ok: true, query: q, results }));
+  } catch (err) {
+    console.error('[search]', q, err.message);
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-cache',
+      'access-control-allow-origin': '*'
+    });
+    res.end(JSON.stringify({ ok: false, error: err.message, results: [] }));
+  }
+}
+
 function serveStatic(reqPath, res) {
   const relPath = reqPath.endsWith('/') ? reqPath + 'index.html' : reqPath;
   const filePath = path.resolve(PUBLIC_DIR, '.' + relPath);
@@ -120,6 +175,10 @@ http.createServer((req, res) => {
     handleProxy(req, res).catch((e) => {
       try { if (!res.headersSent) res.writeHead(500); res.end(e.message); } catch {}
     });
+    return;
+  }
+  if (pathname === '/api/search') {
+    handleSearch(req, res);
     return;
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); res.end(); return; }

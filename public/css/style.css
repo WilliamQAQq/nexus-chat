@@ -642,3 +642,115 @@ dialog::backdrop { background: rgb(10 12 20 / .55); overflow: hidden; overscroll
   .char-top-row { flex-direction: column; align-items: center; }
   .char-avatar-picker { width: 100%; }
 }
+
+/* 联网搜索与工具卡片 */
+#btnWebSearch.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.search-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-bottom: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  font-size: .88em;
+  font-weight: 500;
+  animation: searchPulse 1.8s ease-in-out infinite;
+}
+@keyframes searchPulse {
+  0%, 100% { opacity: 0.85; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.01); }
+}
+.search-spinner {
+  display: inline-block;
+  animation: spinSearch 2s linear infinite;
+}
+@keyframes spinSearch {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+.search-summary-card {
+  margin: 8px 0 12px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  overflow: hidden;
+  font-size: .88em;
+}
+.search-summary-card summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  background: var(--bg-subtle, rgba(0,0,0,0.02));
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  color: var(--text-dim);
+  user-select: none;
+}
+.search-summary-card summary:hover { color: var(--text); }
+.search-summary-card .search-sources-list {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+.search-source-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.search-source-title {
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+}
+.search-source-title:hover { text-decoration: underline; }
+.search-source-snippet {
+  color: var(--text-dim);
+  font-size: .92em;
+  line-height: 1.4;
+}
+.sources-pills-bar {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: .82em;
+}
+.sources-label {
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-right: 2px;
+}
+.source-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--bg-hover);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  text-decoration: none;
+  max-width: 240px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: all .15s ease;
+}
+.source-pill:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}

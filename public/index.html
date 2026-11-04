@@ -66,6 +66,7 @@
         <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行（可粘贴/拖入图片或文件）" aria-label="消息输入"></textarea>
         <div class="composer-bar">
           <button class="icon-btn" id="btnAttach" type="button" aria-label="添加附件" data-i18n-aria="attachBtnTitle" title="添加图片或文本文件" data-i18n-title="attachBtnTitle"><span data-icon="clip"></span></button>
+          <button class="icon-btn" id="btnWebSearch" type="button" aria-label="联网搜索" data-i18n-aria="webSearchToggle" title="联网搜索 (获取最新实时信息与事实检索)" data-i18n-title="webSearchToggle"><span data-icon="globe"></span></button>
           <input type="file" id="fileInput" multiple hidden>
           <div class="meter" id="meter" title="点击查看上下文窗口额度明细" data-i18n-title="meterTitle">
             <div class="meter-bar" id="meterBar">
@@ -158,6 +159,20 @@
         <p class="hint" id="regexStatusHint"></p>
       </section>
 
+      <section class="card" id="cardWebSearch">
+        <div class="card-title">
+          <h3 data-i18n="cardWebSearchTitle">联网搜索 (Web Search)</h3>
+          <button class="btn sm ghost" id="btnOpenSearchSettings" type="button" data-i18n="searchSettings">搜索设置</button>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="paramWebSearch">
+          <span data-i18n="webSearchEnableLabel">开启 AI 联网检索最新知识</span>
+        </label>
+        <p class="hint" id="webSearchModeHint" data-i18n="webSearchHint">
+          遇到未知或时效性知识时，自动调用搜索引擎获取真实网页内容并引用来源。
+        </p>
+      </section>
+
       <section class="card" id="cardPrompt">
         <div class="card-title">
           <h3 data-i18n="cardPromptTitle">系统提示词 (System Prompt)</h3>
@@ -200,6 +215,7 @@
     <h2 id="dlgSettingsTitle" data-i18n="settingsTitle">设置</h2>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="providers" aria-selected="true" data-i18n="tabProviders">API 提供商</button>
+      <button type="button" role="tab" data-tab="tools" aria-selected="false" data-i18n="tabTools">联网与工具</button>
       <button type="button" role="tab" data-tab="general" aria-selected="false" data-i18n="tabGeneral">通用</button>
       <button type="button" role="tab" data-tab="data" aria-selected="false" data-i18n="tabData">数据</button>
     </div>
@@ -264,6 +280,66 @@
       </div>
     </div>
     <p class="hint" data-i18n="keySafetyHint">🔒 API Key 仅保存在本机浏览器 localStorage 中，请求直接（或经由本机 127.0.0.1 代理）发往你配置的服务端。</p>
+  </div>
+
+  <div class="dlg-body" data-panel="tools" hidden>
+    <div class="settings-section">
+      <h3 data-i18n="searchSettingsHead">🌐 联网搜索与工具调用 (Web Search & Tools)</h3>
+      <p class="hint" data-i18n="searchSettingsDesc">
+        开启联网后，大模型可在面对实时资讯、学术资料、最新事实或不懂的知识时，自主调用搜索引擎获取最新网页内容。
+      </p>
+
+      <div class="grid2" style="margin-top:1em">
+        <label class="field">
+          <span data-i18n="searchEngineProviderLabel">搜索引擎提供商</span>
+          <select class="input" id="cfg_searchProvider">
+            <option value="auto" data-i18n="optSearchAuto">智能推荐 (Smart Auto: 本地/免费多源/Gemini原生)</option>
+            <option value="wiki_ddg" data-i18n="optSearchFree">维基百科 + DuckDuckGo (100% 免费免 Key，支持静态部署)</option>
+            <option value="tavily">Tavily AI Search (针对 LLM 优化的专业搜索)</option>
+            <option value="serper">Google Serper API (实时 Google 网页检索)</option>
+            <option value="brave">Brave Search API</option>
+            <option value="jina">Jina AI Search (s.jina.ai)</option>
+            <option value="custom" data-i18n="optSearchCustom">自定义 Search API 接口</option>
+          </select>
+        </label>
+        <label class="field">
+          <span data-i18n="searchTriggerModeLabel">搜索调用策略</span>
+          <select class="input" id="cfg_searchMode">
+            <option value="auto" data-i18n="optSearchModeAuto">自动调用 (模型遇到不懂或时效问题时自主触发)</option>
+            <option value="force" data-i18n="optSearchModeForce">强制前置搜索 (发问前强制先搜索并注入参考网页)</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="grid2">
+        <label class="field" id="cfg_searchKeyWrap">
+          <span data-i18n="searchApiKeyLabel">搜索引擎 API Key <small class="dim">(Tavily / Serper / Brave / Jina)</small></span>
+          <div class="input-group">
+            <input class="input" id="cfg_searchApiKey" type="password" autocomplete="off" spellcheck="false" placeholder="如 tvly-... 或留空使用免费引擎">
+            <button class="btn sm" id="cfg_toggleSearchKey" type="button">显示</button>
+          </div>
+        </label>
+        <label class="field">
+          <span data-i18n="searchMaxResultsLabel">最大参考网页条数 (1-10)</span>
+          <input class="input" id="cfg_searchMaxResults" type="number" min="1" max="10" value="5">
+        </label>
+      </div>
+
+      <label class="field" id="cfg_searchCustomUrlWrap" hidden>
+        <span data-i18n="searchCustomUrlLabel">自定义搜索接口 URL</span>
+        <input class="input mono" id="cfg_searchCustomUrl" placeholder="https://api.example.com/search?q={q}" spellcheck="false">
+        <small class="hint">支持使用 <code>{q}</code> 作为关键词占位符，需返回 JSON 格式。</small>
+      </label>
+
+      <div class="test-search-box" style="margin-top:1.2em;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle)">
+        <label class="field-label" style="font-weight:600;margin-bottom:6px;display:block" data-i18n="testSearchLabel">测试网络检索连通性</label>
+        <div class="input-group">
+          <input class="input" id="cfg_testSearchQuery" placeholder="输入测试关键词，如：DeepSeek 或 量子计算" value="DeepSeek">
+          <button class="btn primary sm" id="cfg_btnTestSearch" type="button"><span data-icon="globe"></span><span data-i18n="btnDoTestSearch" style="margin-left:4px">测试搜索</span></button>
+        </div>
+        <div class="test-search-result" id="cfg_testSearchResult" hidden style="margin-top:10px;font-size:0.88em;max-height:160px;overflow-y:auto"></div>
+      </div>
+    </div>
   </div>
 
   <div class="dlg-body" data-panel="general" hidden>

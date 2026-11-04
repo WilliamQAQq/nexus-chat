@@ -103,4 +103,14 @@ assert.ok(rendered.includes('<strong>bold</strong>'));
 assert.ok(rendered.includes('<code>code</code>'));
 assert.ok(!rendered.includes('<script>')); // sanitized!
 
-console.log('✓ ALL UNIT TESTS PASSED SUCCESSFULLY (8/8)!');
+// Test 9: Web Search & Tools
+console.log('Test 9: Web Search & Tools');
+const { formatSearchResults, WEB_SEARCH_TOOL_OPENAI, WEB_SEARCH_TOOL_ANTHROPIC } = await import('../public/js/tools.js');
+assert.equal(WEB_SEARCH_TOOL_OPENAI.function.name, 'web_search');
+assert.equal(WEB_SEARCH_TOOL_ANTHROPIC.name, 'web_search');
+const formatted = formatSearchResults('Test Query', [{ title: 'Title A', url: 'https://example.com', snippet: 'Snippet A' }]);
+assert.ok(formatted.includes('Test Query'));
+assert.ok(formatted.includes('Title A'));
+assert.ok(formatted.includes('https://example.com'));
+
+console.log('✓ ALL UNIT TESTS PASSED SUCCESSFULLY (9/9)!');

@@ -15,6 +15,7 @@ import {
 import { renderMarkdown } from './markdown.js';
 import { estimateTokens, messageTokens, formatTokens, guessContextWindow, IMAGE_TOKENS } from './tokens.js';
 import { sendChat, listModels, PRESETS, PROVIDER_TYPES, getProviderTypeName, resolveEndpointPreview, detectLocalProxy, hasLocalProxy } from './api.js';
+import { searchWeb } from './tools.js';
 import * as db from './db.js';
 import {
   t, getLang, setLang, relTime as i18nRelTime, LANG_OPTIONS,
@@ -139,7 +140,7 @@ const ssDel = (k) => { try { sessionStorage.removeItem(k); } catch {} };
 const DEFAULT_PARAMS = {
   temperature: 0.7, top_p: 1, max_tokens: 4096, presence_penalty: 0, frequency_penalty: 0,
   enabled: { temperature: true, top_p: false, max_tokens: true, presence_penalty: false, frequency_penalty: false },
-  stream: true, contextWindow: 128000, maxHistory: 0, autoTrim: true, autoCompact: false,
+  stream: true, contextWindow: 128000, maxHistory: 0, autoTrim: true, autoCompact: false, webSearch: false,
 };
 const DEFAULT_PROMPTS = [
   { name: '通用助手', content: '你是一个乐于助人、知识渊博的 AI 助手（当前日期：{{date}}）。回答要准确、清晰、有条理，必要时使用 Markdown 格式（标题、列表、表格、代码块）。' },
@@ -173,6 +174,14 @@ function loadSettings() {
     prompts: s.prompts ?? DEFAULT_PROMPTS,
     defaultParams: mergeParams(s.defaultParams),
     regexScripts: Array.isArray(s.regexScripts) ? s.regexScripts.map(normalizeRegexScript) : clone(DEFAULT_REGEX_SCRIPTS),
+    searchSettings: {
+      provider: 'auto',
+      apiKey: '',
+      maxResults: 5,
+      mode: 'auto',
+      customUrl: '',
+      ...(s.searchSettings || {})
+    },
     userName: s.userName || '',
     userGender: s.userGender || '',
   };
@@ -765,6 +774,32 @@ function fillContent(el, m) {
     }
     return;
   }
+  // 联网搜索进行中提示
+  if (m.searchStatus?.status === 'searching') {
+    const sBar = document.createElement('div');
+    sBar.className = 'search-status-bar';
+    sBar.innerHTML = `<span class="search-spinner">🔍</span> <span>${t('searchingWebFor', escapeHtml(m.searchStatus.query))}</span>`;
+    c.append(sBar);
+  }
+  // 联网搜索结果折叠卡片
+  const sources = m.searchSources || m.searchStatus?.results || [];
+  if (sources.length) {
+    const prevSearchOpen = c.querySelector('details.search-summary-card')?.open ?? false;
+    const card = document.createElement('details');
+    card.className = 'search-summary-card';
+    card.open = prevSearchOpen;
+    const qStr = m.searchStatus?.query || (m.searchQueries || []).join(', ');
+    const count = sources.length;
+    let listHtml = '';
+    sources.forEach((s, idx) => {
+      listHtml += `<div class="search-source-item">
+        <a class="search-source-title" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">[${idx + 1}] ${escapeHtml(s.title || s.url)}</a>
+        ${s.snippet ? `<div class="search-source-snippet">${escapeHtml(s.snippet)}</div>` : ''}
+      </div>`;
+    });
+    card.innerHTML = `<summary><span class="search-badge-icon">🌐</span> <span class="search-badge-title">${t('webSearchResultsTitle', count)}</span> ${qStr ? `<span class="dim">(${escapeHtml(qStr)})</span>` : ''}</summary><div class="search-sources-list">${listHtml}</div>`;
+    c.append(card);
+  }
   const { content, reasoning } = splitThink(m);
   if (reasoning) {
     const d = document.createElement('details');
@@ -795,6 +830,14 @@ function fillContent(el, m) {
       md.innerHTML = renderMarkdown(disp) + (m.pending ? '<span class="cursor"></span>' : '');
     }
     if (content || m.pending) c.append(md);
+  }
+  // 底部来源药丸链接
+  if (sources.length && (content || !m.pending)) {
+    const pBar = document.createElement('div');
+    pBar.className = 'sources-pills-bar';
+    pBar.innerHTML = `<span class="sources-label">${t('sourcesLabel')}:</span>` +
+      sources.map((s, idx) => `<a class="source-pill" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(s.title || '')}\n${escapeHtml(s.snippet || '')}">[${idx + 1}] ${escapeHtml(s.title || s.url)}</a>`).join('');
+    c.append(pBar);
   }
   if (m.error) {
     const e = document.createElement('div');
@@ -970,6 +1013,13 @@ function renderPanel() {
   els.ctxChips.querySelectorAll('button').forEach((b) => b.classList.toggle('active', Number(b.dataset.ctx) === p.contextWindow));
   syncTempChips(p);
   renderExtensionsPanel();
+  if (els.paramWebSearch) els.paramWebSearch.checked = !!p.webSearch;
+  if (els.btnWebSearch) {
+    els.btnWebSearch.classList.toggle('active', !!p.webSearch);
+    els.btnWebSearch.title = p.webSearch
+      ? (getLang() === 'en' ? 'Web search enabled (click to disable)' : '联网搜索已开启（点击关闭）')
+      : (getLang() === 'en' ? 'Web search disabled (click to enable)' : '联网搜索已关闭（点击开启）');
+  }
 }
 
 let meterRaf = 0;
@@ -1174,11 +1224,42 @@ async function generate(conv) {
     });
     const { fullSystemText } = resolveSystemAndPersona(conv);
     const systemText = fullSystemText;
+
+    // 若开启了强制前置联网搜索模式
+    if (conv.params.webSearch && state.settings.searchSettings?.mode === 'force') {
+      const lastUserMsg = [...conv.messages].reverse().find((m) => m.role === 'user');
+      const query = (lastUserMsg?.content || '').slice(0, 100).trim();
+      if (query) {
+        assistant.searchStatus = { status: 'searching', query };
+        scheduleStreamRender(conv, assistant);
+        const sRes = await searchWeb(query, {
+          searchSettings: state.settings.searchSettings,
+          signal: controller.signal,
+          hasLocalProxy: hasLocalProxy()
+        });
+        assistant.searchStatus = { status: 'done', query, count: sRes.results.length };
+        assistant.searchSources = sRes.results;
+        assistant.searchQueries = [query];
+        scheduleStreamRender(conv, assistant);
+        if (sRes.results.length && history.length) {
+          const lastH = history[history.length - 1];
+          if (lastH && lastH.role === 'user') {
+            lastH.content = `${lastH.content}\n\n${sRes.formattedText}`;
+          }
+        }
+      }
+    }
+
     const res = await sendChat({
-      provider, model: conv.model, system: systemText, messages: history, params: conv.params, signal: controller.signal,
-      onDelta: ({ content, reasoning }) => {
+      provider, model: conv.model, system: systemText, messages: history,
+      params: { ...conv.params, searchSettings: state.settings.searchSettings },
+      signal: controller.signal,
+      onDelta: ({ content, reasoning, searchStatus, searchSources, searchQueries }) => {
         if (content) assistant.content += content;
         if (reasoning) assistant.reasoning += reasoning;
+        if (searchStatus) assistant.searchStatus = searchStatus;
+        if (searchSources) assistant.searchSources = searchSources;
+        if (searchQueries) assistant.searchQueries = searchQueries;
         scheduleStreamRender(conv, assistant);
       },
     });
@@ -1332,11 +1413,69 @@ function maskKeyInput() {
   els.pf_toggleKey.textContent = getLang() === 'en' ? 'Show' : '显示';
 }
 
+function renderSearchSettings() {
+  const ss = state.settings.searchSettings || {};
+  if (els.cfg_searchProvider) els.cfg_searchProvider.value = ss.provider || 'auto';
+  if (els.cfg_searchMode) els.cfg_searchMode.value = ss.mode || 'auto';
+  if (els.cfg_searchApiKey) els.cfg_searchApiKey.value = ss.apiKey || '';
+  if (els.cfg_searchMaxResults) els.cfg_searchMaxResults.value = ss.maxResults || 5;
+  if (els.cfg_searchCustomUrl) els.cfg_searchCustomUrl.value = ss.customUrl || '';
+  if (els.cfg_searchCustomUrlWrap) {
+    els.cfg_searchCustomUrlWrap.hidden = (ss.provider !== 'custom');
+  }
+}
+
+function saveSearchSettings() {
+  if (!state.settings.searchSettings) state.settings.searchSettings = {};
+  state.settings.searchSettings.provider = els.cfg_searchProvider?.value || 'auto';
+  state.settings.searchSettings.mode = els.cfg_searchMode?.value || 'auto';
+  state.settings.searchSettings.apiKey = els.cfg_searchApiKey?.value?.trim() || '';
+  state.settings.searchSettings.maxResults = Number(els.cfg_searchMaxResults?.value) || 5;
+  state.settings.searchSettings.customUrl = els.cfg_searchCustomUrl?.value?.trim() || '';
+  saveSettings();
+  if (els.cfg_searchCustomUrlWrap) {
+    els.cfg_searchCustomUrlWrap.hidden = (state.settings.searchSettings.provider !== 'custom');
+  }
+}
+
+async function testSearchConnectivity() {
+  const q = els.cfg_testSearchQuery?.value?.trim();
+  if (!q) { toast(t('testSearchEmpty')); return; }
+  const resEl = els.cfg_testSearchResult;
+  if (!resEl) return;
+  resEl.hidden = false;
+  resEl.innerHTML = `<span class="dim">🔍 ${t('searchingWebFor', escapeHtml(q))}</span>`;
+  saveSearchSettings();
+  try {
+    const res = await searchWeb(q, {
+      searchSettings: state.settings.searchSettings,
+      hasLocalProxy: hasLocalProxy(),
+      signal: AbortSignal.timeout(10000)
+    });
+    if (!res.ok && res.error) throw new Error(res.error);
+    if (!res.results.length) {
+      resEl.innerHTML = `<span class="warn">未检索到结果。</span>`;
+      return;
+    }
+    let html = `<div style="font-weight:600;color:var(--accent);margin-bottom:6px">${t('testSearchSuccess', res.results.length)}</div>`;
+    res.results.forEach((r, idx) => {
+      html += `<div style="margin-bottom:6px;border-bottom:1px dashed var(--border);padding-bottom:4px">
+        <a href="${escapeHtml(r.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-weight:500">[${idx + 1}] ${escapeHtml(r.title || r.url)}</a>
+        <div style="color:var(--text-dim);font-size:0.9em">${escapeHtml(r.snippet || '')}</div>
+      </div>`;
+    });
+    resEl.innerHTML = html;
+  } catch (err) {
+    resEl.innerHTML = `<div class="err-box" style="margin:0">${t('testSearchFailed', escapeHtml(err.message))}</div>`;
+  }
+}
+
 function openSettings(tab = 'providers') {
   switchTab(tab);
   if (!state.editingProviderId || !getProvider(state.editingProviderId)) state.editingProviderId = state.settings.providers[0]?.id ?? null;
   maskKeyInput();
   renderProviders();
+  renderSearchSettings();
   if (els.set_language) els.set_language.value = state.settings.language || 'auto';
   els.set_theme.value = state.settings.theme;
   els.set_sendKey.value = state.settings.sendKey;
@@ -3670,6 +3809,44 @@ function bindEvents() {
       selectRegex(r.id);
       renderRegexList();
     }
+  });
+
+  // 联网搜索 (Web Search) 事件绑定
+  els.btnWebSearch?.addEventListener('click', () => {
+    const c = currentConv();
+    if (!c) return;
+    c.params.webSearch = !c.params.webSearch;
+    saveConvSoon(c, 0);
+    renderPanel();
+    toast(c.params.webSearch
+      ? (getLang() === 'en' ? 'Web search enabled' : '已开启联网搜索')
+      : (getLang() === 'en' ? 'Web search disabled' : '已关闭联网搜索'));
+  });
+  els.paramWebSearch?.addEventListener('change', () => {
+    const c = currentConv();
+    if (!c) return;
+    c.params.webSearch = els.paramWebSearch.checked;
+    saveConvSoon(c, 0);
+    renderPanel();
+  });
+  els.btnOpenSearchSettings?.addEventListener('click', () => {
+    openSettings('tools');
+  });
+
+  // 搜索设置表单
+  els.cfg_searchProvider?.addEventListener('change', saveSearchSettings);
+  els.cfg_searchMode?.addEventListener('change', saveSearchSettings);
+  els.cfg_searchApiKey?.addEventListener('input', saveSearchSettings);
+  els.cfg_searchMaxResults?.addEventListener('input', saveSearchSettings);
+  els.cfg_searchCustomUrl?.addEventListener('input', saveSearchSettings);
+  els.cfg_toggleSearchKey?.addEventListener('click', () => {
+    const isPw = els.cfg_searchApiKey.type === 'password';
+    els.cfg_searchApiKey.type = isPw ? 'text' : 'password';
+    els.cfg_toggleSearchKey.textContent = isPw ? (getLang() === 'en' ? 'Hide' : '隐藏') : (getLang() === 'en' ? 'Show' : '显示');
+  });
+  els.cfg_btnTestSearch?.addEventListener('click', testSearchConnectivity);
+  els.cfg_testSearchQuery?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); testSearchConnectivity(); }
   });
 
   // 全局拖放：支持拖入 PNG 角色卡、JSON 角色卡/世界书/正则
