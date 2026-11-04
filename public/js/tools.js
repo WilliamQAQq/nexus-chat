@@ -6,13 +6,13 @@ export const WEB_SEARCH_TOOL_OPENAI = {
   type: 'function',
   function: {
     name: 'web_search',
-    description: 'Search the live internet for current, real-time, or factual information that you do not know or need to verify.',
+    description: 'Search the live web for accurate factual, historical, or real-time information. Provide ONLY 1 to 4 concise keywords or core subject terms (e.g. "萨拉热窝围城", "DeepSeek V3 架构"). Never formulate long questions, hypotheses, or full sentences with guessed answers.',
     parameters: {
       type: 'object',
       properties: {
         query: {
           type: 'string',
-          description: 'The search query or keywords, e.g. "DeepSeek V3 details", "latest weather in Tokyo"'
+          description: 'Concise search keywords (e.g. "萨拉热窝围城", "Claude 3.7", "东京天气"). Do not include full questions or guesses.'
         }
       },
       required: ['query']
@@ -22,18 +22,58 @@ export const WEB_SEARCH_TOOL_OPENAI = {
 
 export const WEB_SEARCH_TOOL_ANTHROPIC = {
   name: 'web_search',
-  description: 'Search the live internet for current, real-time, or factual information that you do not know or need to verify.',
+  description: 'Search the live web for accurate factual, historical, or real-time information. Provide ONLY 1 to 4 concise keywords or core subject terms (e.g. "萨拉热窝围城", "DeepSeek V3 架构"). Never formulate long questions, hypotheses, or full sentences with guessed answers.',
   input_schema: {
     type: 'object',
     properties: {
       query: {
         type: 'string',
-        description: 'The search query or keywords'
+        description: 'Concise search keywords (e.g. "萨拉热窝围城", "Claude 3.7"). Do not include full questions or guesses.'
       }
     },
     required: ['query']
   }
 };
+
+/**
+ * 智能清洗大模型生成的检索词，去除疑问后缀、虚词及猜想干扰
+ */
+export function cleanSearchQuery(query) {
+  if (!query) return '';
+  let q = query.trim().replace(/["'“”‘’《》]/g, ' ');
+  const noisePatterns = [
+    /起止[日时]期/g,
+    /具体[日时]期/g,
+    /具体时间/g,
+    /详细时间/g,
+    /开始时间/g,
+    /结束时间/g,
+    /是什么时候/g,
+    /发生[在于]?什么时候/g,
+    /什么时候/g,
+    /具体有哪些/g,
+    /怎么样/g,
+    /是什么/g,
+    /的介绍/g,
+    /的相关资料/g,
+    /的相关信息/g,
+    /的最新消息/g,
+    /详细介绍/g,
+    /简要介绍/g,
+    /的?最新进展/g,
+    /到底是谁/g,
+    /是谁/g,
+  ];
+  for (const pat of noisePatterns) {
+    q = q.replace(pat, ' ');
+  }
+  const dateRegex = /\d{4}年(?:\d{1,2}月)?(?:\d{1,2}[日号])?|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}[日号]/g;
+  const noDates = q.replace(dateRegex, ' ').replace(/\s+/g, ' ').trim();
+  if (noDates.length >= 2) {
+    return noDates;
+  }
+  return q.replace(/\s+/g, ' ').trim();
+}
 
 /**
  * 格式化搜索结果为注入大模型的文本
@@ -53,23 +93,48 @@ export function formatSearchResults(query, results = []) {
 }
 
 /**
- * 免费客户端 Wikipedia 检索 (支持 zh 和 en)
+ * 免费客户端 Wikipedia 检索 (支持 zh 和 en，结合词条导言 extracts)
  */
 async function searchWikipedia(query, lang = 'zh', signal) {
-  try {
-    const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json&origin=*&srlimit=4`;
-    const res = await fetch(url, { signal: signal || AbortSignal.timeout(6000) });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return (data.query?.search || []).map((item) => ({
-      title: item.title,
-      snippet: (item.snippet || '').replace(/<[^>]+>/g, '').trim(),
-      url: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, '_'))}`,
-      source: `Wikipedia (${lang.toUpperCase()})`
-    }));
-  } catch {
-    return [];
+  const candidates = [query];
+  const cleaned = cleanSearchQuery(query);
+  if (cleaned && cleaned !== query) {
+    candidates.unshift(cleaned);
   }
+
+  for (const q of candidates) {
+    try {
+      const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&utf8=&format=json&origin=*&srlimit=4`;
+      const res = await fetch(url, { signal: signal || AbortSignal.timeout(6000) });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const hits = data.query?.search || [];
+      if (!hits.length) continue;
+
+      let pages = {};
+      try {
+        const titles = hits.map((h) => h.title).join('|');
+        const extractUrl = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(titles)}&format=json&origin=*`;
+        const eRes = await fetch(extractUrl, { signal: signal || AbortSignal.timeout(4000) });
+        if (eRes.ok) {
+          const eData = await eRes.json();
+          pages = eData.query?.pages || {};
+        }
+      } catch {}
+
+      return hits.map((item) => {
+        const p = Object.values(pages).find((x) => x.title === item.title);
+        const extract = p?.extract || item.snippet.replace(/<[^>]+>/g, '').trim();
+        return {
+          title: item.title,
+          snippet: extract.slice(0, 360).trim(),
+          url: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, '_'))}`,
+          source: `Wikipedia (${lang.toUpperCase()})`
+        };
+      });
+    } catch {}
+  }
+  return [];
 }
 
 /**
@@ -110,10 +175,11 @@ async function searchDDGInstant(query, signal) {
  * 免费多源客户端搜索降级 (免 API Key，支持 GitHub Pages)
  */
 async function searchFreeFallback(query, limit = 5, signal) {
+  const cleaned = cleanSearchQuery(query);
   const [zhWiki, enWiki, ddg] = await Promise.all([
     searchWikipedia(query, 'zh', signal),
-    searchWikipedia(query, 'en', signal),
-    searchDDGInstant(query, signal)
+    searchWikipedia(cleaned || query, 'en', signal),
+    searchDDGInstant(cleaned || query, signal)
   ]);
   const combined = [...zhWiki, ...enWiki, ...ddg];
   const seen = new Set();
