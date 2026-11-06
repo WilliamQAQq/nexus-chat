@@ -17,8 +17,8 @@ export const getProviderTypeName = (type, lang = 'zh-CN') =>
 
 export const PRESETS = [
   { name: 'OpenAI', enName: 'OpenAI', type: 'openai', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4.1', 'gpt-4o', 'gpt-4o-mini', 'o4-mini'] },
-  { name: 'Anthropic Claude', enName: 'Anthropic Claude', type: 'anthropic', baseUrl: 'https://api.anthropic.com', models: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'] },
-  { name: 'Google Gemini', enName: 'Google Gemini', type: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', models: ['gemini-2.5-flash', 'gemini-2.5-pro'] },
+  { name: 'Anthropic Claude', enName: 'Anthropic Claude', type: 'anthropic', baseUrl: 'https://api.anthropic.com', models: ['claude-3-7-sonnet-20250219', 'claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'] },
+  { name: 'Google Gemini', enName: 'Google Gemini', type: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', models: ['gemini-4-argon', 'gemini-2.5-flash', 'gemini-2.5-pro'] },
   { name: 'DeepSeek', enName: 'DeepSeek', type: 'openai', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
   { name: 'OpenRouter', enName: 'OpenRouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
   { name: '硅基流动 SiliconFlow', enName: 'SiliconFlow', type: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1'] },
@@ -182,7 +182,14 @@ function dataUrlParts(u) {
 function normalizeTurns(messages) {
   const out = [];
   for (const m of messages) {
-    if (!out.length && m.role !== 'user') continue;
+    if (!out.length && m.role !== 'user') {
+      if (m.role === 'assistant' && (m.content || m.images?.length)) {
+        // 若对话首条为角色卡开场白/问候语，保留开场白并前置用户启动提示，避免开场背景丢失
+        out.push({ role: 'user', content: '[Start of conversation]', images: [] });
+      } else {
+        continue;
+      }
+    }
     const last = out[out.length - 1];
     if (last && last.role === m.role) {
       last.content = [last.content, m.content].filter(Boolean).join('\n\n');

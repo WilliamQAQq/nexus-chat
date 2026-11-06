@@ -6,6 +6,7 @@ export const PLACEMENT = {
   USER_INPUT: 0,       // 用户输入：发送/保存前处理用户输入
   AI_OUTPUT: 1,        // AI 输出：模型生成完成/流式内容处理
   DISPLAY_MARKDOWN: 2, // 仅显示渲染：用于界面渲染，不修改原始对话数据
+  DISPLAY_ONLY: 2,     // 仅显示渲染别名 (Display Only)
   REQUEST_PROMPT: 3,   // 仅请求发送：发给 API 的 Prompt 处理，不修改原始对话
   WORLD_INFO: 4,       // 世界书：注入世界书条目内容时的替换
 };
