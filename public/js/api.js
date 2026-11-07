@@ -20,13 +20,14 @@ export const PRESETS = [
   { name: 'Anthropic Claude', enName: 'Anthropic Claude', type: 'anthropic', baseUrl: 'https://api.anthropic.com', models: ['claude-3-7-sonnet-20250219', 'claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-4-5'] },
   { name: 'Google Gemini', enName: 'Google Gemini', type: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', models: ['gemini-4-argon', 'gemini-2.5-flash', 'gemini-2.5-pro'] },
   { name: 'DeepSeek', enName: 'DeepSeek', type: 'openai', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'] },
-  { name: 'OpenRouter', enName: 'OpenRouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
-  { name: '硅基流动 SiliconFlow', enName: 'SiliconFlow', type: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1'] },
+  { name: 'OpenRouter', enName: 'OpenRouter', type: 'openai', baseUrl: 'https://openrouter.ai/api/v1', models: ['deepseek/deepseek-chat-v3-0324:free', 'deepseek/deepseek-r1:free', 'google/gemini-2.0-flash-exp:free', 'meta-llama/llama-3.3-70b-instruct:free'] },
+  { name: 'GitHub Models (免费)', enName: 'GitHub Models (Free)', type: 'openai', baseUrl: 'https://models.inference.ai.azure.com#', models: ['gpt-4o', 'DeepSeek-R1', 'gpt-4o-mini', 'Llama-3.3-70B-Instruct'] },
+  { name: '硅基流动 SiliconFlow', enName: 'SiliconFlow', type: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen2.5-7B-Instruct', 'THUDM/glm-4-9b-chat'] },
   { name: '阿里云百炼 (通义千问)', enName: 'Alibaba Cloud (Qwen)', type: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo'] },
   { name: '火山方舟 (豆包 / DeepSeek)', enName: 'Volcengine Ark (Doubao / DeepSeek)', type: 'openai', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', models: [] },
   { name: 'Moonshot (Kimi)', enName: 'Moonshot (Kimi)', type: 'openai', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-0711-preview', 'moonshot-v1-128k'] },
-  { name: '智谱 GLM', enName: 'Zhipu GLM', type: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-plus', 'glm-4-flash'] },
-  { name: 'Groq', enName: 'Groq', type: 'openai', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile'] },
+  { name: '智谱 GLM', enName: 'Zhipu GLM', type: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4-flash-250414', 'glm-4-flash', 'glm-z1-flash', 'glm-4-plus'] },
+  { name: 'Groq', enName: 'Groq', type: 'openai', baseUrl: 'https://api.groq.com/openai/v1', models: ['llama-3.3-70b-versatile', 'deepseek-r1-distill-llama-70b', 'qwen-qwq-32b', 'gemma2-9b-it'] },
   { name: 'Mistral AI', enName: 'Mistral AI', type: 'openai', baseUrl: 'https://api.mistral.ai/v1', models: ['mistral-large-latest', 'codestral-latest'] },
   { name: 'xAI Grok', enName: 'xAI Grok', type: 'openai', baseUrl: 'https://api.x.ai/v1', models: ['grok-3', 'grok-3-mini'] },
   { name: 'Ollama (本地)', enName: 'Ollama (Local)', type: 'openai', baseUrl: 'http://localhost:11434/v1', models: [], apiKey: 'ollama' },
@@ -182,7 +183,8 @@ function dataUrlParts(u) {
 function normalizeTurns(messages) {
   const out = [];
   for (const m of messages) {
-    if (!out.length && m.role !== 'user') {
+    const isStructuredTurn = !!(m.anthropicContent || m.toolResults || m.tool_calls || m.role === 'tool' || m.role === 'tool_result');
+    if (!out.length && m.role !== 'user' && !isStructuredTurn) {
       if (m.role === 'assistant' && (m.content || m.images?.length)) {
         // 若对话首条为角色卡开场白/问候语，保留开场白并前置用户启动提示，避免开场背景丢失
         out.push({ role: 'user', content: '[Start of conversation]', images: [] });
@@ -190,13 +192,70 @@ function normalizeTurns(messages) {
         continue;
       }
     }
+    if (isStructuredTurn) {
+      out.push({ ...m, images: [...(m.images || [])] });
+      continue;
+    }
     const last = out[out.length - 1];
-    if (last && last.role === m.role) {
+    const lastIsStructured = last && !!(last.anthropicContent || last.toolResults || last.tool_calls || last.role === 'tool' || last.role === 'tool_result');
+    if (last && !lastIsStructured && last.role === m.role) {
       last.content = [last.content, m.content].filter(Boolean).join('\n\n');
       last.images = [...(last.images || []), ...(m.images || [])];
-    } else out.push({ role: m.role, content: m.content || '', images: [...(m.images || [])] });
+    } else {
+      out.push({ ...m, role: m.role, content: m.content || '', images: [...(m.images || [])] });
+    }
   }
   return out;
+}
+
+// 执行 OpenAI 工具调用列表（支持单轮并行多次调用 web_search，并为所有 tool_call_id 生成对应 tool 消息）
+async function executeOpenAIToolCalls(rawToolCalls, { params, signal, onDelta }) {
+  const normalizedCalls = rawToolCalls.filter(Boolean).map((tc, i) => ({
+    id: tc.id || `call_${i}_${Date.now()}`,
+    type: 'function',
+    function: {
+      name: tc.function?.name || '',
+      arguments: tc.function?.arguments || '{}'
+    }
+  }));
+
+  const toolMessages = [];
+  for (const tc of normalizedCalls) {
+    if (tc.function.name === 'web_search') {
+      let query = '';
+      try {
+        query = JSON.parse(tc.function.arguments || '{}').query || '';
+      } catch {
+        query = tc.function.arguments || '';
+      }
+      if (query) {
+        onDelta({ searchStatus: { status: 'searching', query } });
+        const sRes = await searchWeb(query, {
+          searchSettings: params.searchSettings,
+          signal,
+          hasLocalProxy: localProxyAvailable
+        });
+        onDelta({
+          searchStatus: { status: 'done', query, count: sRes.results.length },
+          searchSources: sRes.results,
+          searchQueries: [query]
+        });
+        toolMessages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: sRes.formattedText
+        });
+        continue;
+      }
+    }
+    toolMessages.push({
+      role: 'tool',
+      tool_call_id: tc.id,
+      content: '未提供有效的搜索关键词。'
+    });
+  }
+
+  return { normalizedCalls, toolMessages };
 }
 
 // ---------------- OpenAI 兼容 ----------------
@@ -256,28 +315,15 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
   if (!params.stream) {
     const j = await res.json();
     const msg = j.choices?.[0]?.message ?? {};
-    if (msg.tool_calls?.length && allowTools) {
-      const toolCall = msg.tool_calls[0];
-      if (toolCall.function?.name === 'web_search') {
-        let query = '';
-        try { query = JSON.parse(toolCall.function.arguments || '{}').query || ''; }
-        catch { query = toolCall.function.arguments || ''; }
-        if (query) {
-          onDelta({ searchStatus: { status: 'searching', query } });
-          const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
-          onDelta({
-            searchStatus: { status: 'done', query, count: sRes.results.length },
-            searchSources: sRes.results,
-            searchQueries: [query]
-          });
-          const followMessages = [
-            ...messages,
-            { role: 'assistant', content: msg.content || null, tool_calls: msg.tool_calls },
-            { role: 'tool', tool_call_id: toolCall.id, content: sRes.formattedText }
-          ];
-          return chatOpenAI({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
-        }
-      }
+    const hasWebSearch = msg.tool_calls?.some((tc) => tc?.function?.name === 'web_search');
+    if (hasWebSearch && allowTools) {
+      const { normalizedCalls, toolMessages } = await executeOpenAIToolCalls(msg.tool_calls, { params, signal, onDelta });
+      const followMessages = [
+        ...messages,
+        { role: 'assistant', content: msg.content || null, tool_calls: normalizedCalls },
+        ...toolMessages
+      ];
+      return chatOpenAI({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
     }
     onDelta({ content: msg.content ?? '', reasoning: msg.reasoning_content ?? msg.reasoning ?? '' });
     return { usage: toUsage(j.usage), finish: j.choices?.[0]?.finish_reason };
@@ -320,51 +366,28 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
   }
 
   // 检查是否触发了 web_search 联网搜索工具
-  const validTool = accToolCalls.find((tc) => tc?.function?.name === 'web_search');
-  if (validTool && allowTools) {
-    let query = '';
-    try {
-      const parsed = JSON.parse(validTool.function.arguments || '{}');
-      query = parsed.query || '';
-    } catch {
-      query = validTool.function.arguments || '';
+  const hasWebSearch = accToolCalls.some((tc) => tc?.function?.name === 'web_search');
+  if (hasWebSearch && allowTools) {
+    const { normalizedCalls, toolMessages } = await executeOpenAIToolCalls(accToolCalls, { params, signal, onDelta });
+    const followMessages = [
+      ...messages,
+      {
+        role: 'assistant',
+        content: accContent || null,
+        tool_calls: normalizedCalls
+      },
+      ...toolMessages
+    ];
+    const nextRes = await chatOpenAI({
+      provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
+    });
+    if (usage && nextRes?.usage) {
+      nextRes.usage = {
+        prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
+        completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
+      };
     }
-    if (query) {
-      onDelta({ searchStatus: { status: 'searching', query } });
-      const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
-      onDelta({
-        searchStatus: { status: 'done', query, count: sRes.results.length },
-        searchSources: sRes.results,
-        searchQueries: [query]
-      });
-      const followMessages = [
-        ...messages,
-        {
-          role: 'assistant',
-          content: accContent || null,
-          tool_calls: accToolCalls.map((tc, i) => ({
-            id: tc.id || `call_${i}_${Date.now()}`,
-            type: 'function',
-            function: { name: tc.function.name, arguments: tc.function.arguments }
-          }))
-        },
-        {
-          role: 'tool',
-          tool_call_id: validTool.id || `call_${Date.now()}`,
-          content: sRes.formattedText
-        }
-      ];
-      const nextRes = await chatOpenAI({
-        provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
-      });
-      if (usage && nextRes?.usage) {
-        nextRes.usage = {
-          prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
-          completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
-        };
-      }
-      return nextRes;
-    }
+    return nextRes;
   }
 
   return { usage, finish };
@@ -381,6 +404,12 @@ function anthropicHeaders(provider) {
 }
 
 function toAnthropicMessage(m) {
+  if (m.toolResults) {
+    return {
+      role: 'user',
+      content: m.toolResults
+    };
+  }
   if (m.role === 'tool_result' || m.role === 'tool') {
     return {
       role: 'user',
@@ -397,6 +426,43 @@ function toAnthropicMessage(m) {
       ...(m.content ? [{ type: 'text', text: m.content }] : []),
     ]
   };
+}
+
+async function executeAnthropicToolUses(toolUses, { params, signal, onDelta }) {
+  const toolResults = [];
+  for (const tu of toolUses) {
+    let query = '';
+    try {
+      query = (typeof tu.input === 'object' ? tu.input?.query : JSON.parse(tu.input || '{}').query) || '';
+    } catch {
+      query = typeof tu.input === 'string' ? tu.input : '';
+    }
+    if (tu.name === 'web_search' && query) {
+      onDelta({ searchStatus: { status: 'searching', query } });
+      const sRes = await searchWeb(query, {
+        searchSettings: params.searchSettings,
+        signal,
+        hasLocalProxy: localProxyAvailable
+      });
+      onDelta({
+        searchStatus: { status: 'done', query, count: sRes.results.length },
+        searchSources: sRes.results,
+        searchQueries: [query]
+      });
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: tu.id,
+        content: sRes.formattedText
+      });
+    } else {
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: tu.id,
+        content: '未提供有效的搜索关键词。'
+      });
+    }
+  }
+  return toolResults;
 }
 
 async function chatAnthropic({ provider, model, system, messages, params, signal, onDelta, depth = 0 }) {
@@ -430,24 +496,13 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
       else if (b.type === 'tool_use') toolUses.push(b);
     }
     if (toolUses.length && allowTools) {
-      const tu = toolUses[0];
-      let query = '';
-      try { query = (typeof tu.input === 'object' ? tu.input?.query : JSON.parse(tu.input || '{}').query) || ''; } catch { query = tu.input || ''; }
-      if (query) {
-        onDelta({ searchStatus: { status: 'searching', query } });
-        const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
-        onDelta({
-          searchStatus: { status: 'done', query, count: sRes.results.length },
-          searchSources: sRes.results,
-          searchQueries: [query]
-        });
-        const followMessages = [
-          ...messages,
-          { role: 'assistant', anthropicContent: j.content },
-          { role: 'tool_result', tool_use_id: tu.id, content: sRes.formattedText }
-        ];
-        return chatAnthropic({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
-      }
+      const toolResults = await executeAnthropicToolUses(toolUses, { params, signal, onDelta });
+      const followMessages = [
+        ...messages,
+        { role: 'assistant', anthropicContent: j.content },
+        { role: 'user', toolResults }
+      ];
+      return chatAnthropic({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
     }
     onDelta({ content, reasoning });
     return { usage: j.usage ? { prompt: j.usage.input_tokens, completion: j.usage.output_tokens } : null, finish: j.stop_reason };
@@ -499,40 +554,29 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
   }
 
   if (toolUses.length && allowTools) {
-    const tu = toolUses[0];
-    let query = '';
-    try { query = JSON.parse(tu.input || '{}').query || ''; } catch { query = tu.input || ''; }
-    if (query) {
-      onDelta({ searchStatus: { status: 'searching', query } });
-      const sRes = await searchWeb(query, { searchSettings: params.searchSettings, signal, hasLocalProxy: localProxyAvailable });
-      onDelta({
-        searchStatus: { status: 'done', query, count: sRes.results.length },
-        searchSources: sRes.results,
-        searchQueries: [query]
-      });
-      const anthropicContent = [];
-      if (accContent) anthropicContent.push({ type: 'text', text: accContent });
-      for (const t of toolUses) {
-        let parsed = {};
-        try { parsed = JSON.parse(t.input || '{}'); } catch {}
-        anthropicContent.push({ type: 'tool_use', id: t.id, name: t.name, input: parsed });
-      }
-      const followMessages = [
-        ...messages,
-        { role: 'assistant', anthropicContent },
-        { role: 'tool_result', tool_use_id: tu.id, content: sRes.formattedText }
-      ];
-      const nextRes = await chatAnthropic({
-        provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
-      });
-      if (usage && nextRes?.usage) {
-        nextRes.usage = {
-          prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
-          completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
-        };
-      }
-      return nextRes;
+    const toolResults = await executeAnthropicToolUses(toolUses, { params, signal, onDelta });
+    const anthropicContent = [];
+    if (accContent) anthropicContent.push({ type: 'text', text: accContent });
+    for (const t of toolUses) {
+      let parsed = {};
+      try { parsed = JSON.parse(t.input || '{}'); } catch {}
+      anthropicContent.push({ type: 'tool_use', id: t.id, name: t.name, input: parsed });
     }
+    const followMessages = [
+      ...messages,
+      { role: 'assistant', anthropicContent },
+      { role: 'user', toolResults }
+    ];
+    const nextRes = await chatAnthropic({
+      provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
+    });
+    if (usage && nextRes?.usage) {
+      nextRes.usage = {
+        prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
+        completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
+      };
+    }
+    return nextRes;
   }
 
   return { usage, finish };

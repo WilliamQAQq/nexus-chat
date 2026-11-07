@@ -93,10 +93,14 @@ async function searchBing(query) {
   if (!res.ok) throw new Error(`Bing returned ${res.status}`);
   const html = await res.text();
   const results = [];
-  const regex = /<h2><a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>[\s\S]*?<div class="b_caption">[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/gi;
-  let m;
-  while ((m = regex.exec(html)) !== null && results.length < 6) {
-    let rawUrl = m[1].replace(/&amp;/g, '&');
+  const blockRegex = /<li class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
+  let blockMatch;
+  while ((blockMatch = blockRegex.exec(html)) !== null && results.length < 6) {
+    const block = blockMatch[1];
+    const linkMatch = /<h2><a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>/i.exec(block);
+    if (!linkMatch) continue;
+    const capMatch = /<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i.exec(block) || /<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
+    let rawUrl = linkMatch[1].replace(/&amp;/g, '&');
     try {
       const u = new URL(rawUrl);
       const p = u.searchParams.get('u');
@@ -104,8 +108,8 @@ async function searchBing(query) {
         rawUrl = Buffer.from(p.slice(2), 'base64').toString('utf8');
       }
     } catch {}
-    const title = m[2].replace(/<[^>]+>/g, '').trim();
-    const snippet = m[3].replace(/<[^>]+>/g, '').trim();
+    const title = linkMatch[2].replace(/<[^>]+>/g, '').trim();
+    const snippet = (capMatch ? capMatch[1] : '').replace(/<[^>]+>/g, '').trim();
     if (title && snippet) results.push({ title, snippet, url: rawUrl });
   }
   return results;

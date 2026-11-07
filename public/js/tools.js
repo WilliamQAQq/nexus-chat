@@ -96,25 +96,43 @@ export function formatSearchResults(query, results = []) {
  * 免费客户端 Wikipedia 检索 (支持 zh 和 en，结合词条导言 extracts)
  */
 async function searchWikipedia(query, lang = 'zh', signal) {
-  const candidates = [query];
   const cleaned = cleanSearchQuery(query);
-  if (cleaned && cleaned !== query) {
-    candidates.unshift(cleaned);
+  const candidates = [];
+  if (cleaned) candidates.push(cleaned);
+  if (cleaned && cleaned.includes(' ')) {
+    const primary = cleaned.split(/\s+/)[0];
+    if (primary && primary.length >= 2 && !candidates.includes(primary)) {
+      candidates.push(primary);
+    }
   }
+  if (query && !candidates.includes(query)) {
+    candidates.push(query);
+  }
+
+  const variantParam = lang === 'zh' ? '&variant=zh-cn' : '';
 
   for (const q of candidates) {
     try {
-      const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&utf8=&format=json&origin=*&srlimit=4`;
+      const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&utf8=&format=json&origin=*&srlimit=4${variantParam}`;
       const res = await fetch(url, { signal: signal || AbortSignal.timeout(6000) });
       if (!res.ok) continue;
       const data = await res.json();
       const hits = data.query?.search || [];
       if (!hits.length) continue;
 
+      // 若是包含空格的复合查询，检验首条结果是否与主词相关；若完全不相关且还有更短候选词则继续尝试主词
+      if (q.includes(' ') && candidates.length > 1) {
+        const core = q.split(/\s+/)[0].toLowerCase();
+        const firstText = `${hits[0].title || ''} ${hits[0].snippet || ''}`.toLowerCase();
+        if (core.length >= 2 && !firstText.includes(core.slice(0, 2))) {
+          continue;
+        }
+      }
+
       let pages = {};
       try {
         const titles = hits.map((h) => h.title).join('|');
-        const extractUrl = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(titles)}&format=json&origin=*`;
+        const extractUrl = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(titles)}&format=json&origin=*${variantParam}`;
         const eRes = await fetch(extractUrl, { signal: signal || AbortSignal.timeout(4000) });
         if (eRes.ok) {
           const eData = await eRes.json();
@@ -123,11 +141,11 @@ async function searchWikipedia(query, lang = 'zh', signal) {
       } catch {}
 
       return hits.map((item) => {
-        const p = Object.values(pages).find((x) => x.title === item.title);
+        const p = Object.values(pages).find((x) => x.title === item.title) || pages[item.pageid];
         const extract = p?.extract || item.snippet.replace(/<[^>]+>/g, '').trim();
         return {
           title: item.title,
-          snippet: extract.slice(0, 360).trim(),
+          snippet: extract.slice(0, 420).trim(),
           url: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, '_'))}`,
           source: `Wikipedia (${lang.toUpperCase()})`
         };

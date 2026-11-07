@@ -1,7 +1,7 @@
 import {
   base64ToUtf8, utf8ToBase64, extractPngTextChunks, embedCharaInPng,
   parseCharacterCardJson, parseCharacterCardFile, exportCharacterCardV2,
-  expandCharacterMacros, buildCharacterPrompt
+  expandCharacterMacros, buildCharacterPrompt, buildPostHistoryPrompt
 } from './character.js';
 import {
   normalizeLorebookEntry, parseLorebookJson, exportLorebookJson,
@@ -119,8 +119,13 @@ async function copyText(text) {
 }
 
 function download(name, content, type = 'application/json') {
+  let payload = content;
+  if (content && typeof content === 'object' && !(content instanceof Blob) && !(content instanceof ArrayBuffer) && !ArrayBuffer.isView(content)) {
+    payload = JSON.stringify(content, null, 2);
+  }
+  const blob = payload instanceof Blob ? payload : new Blob([payload], { type });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([content], { type }));
+  a.href = URL.createObjectURL(blob);
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -371,9 +376,14 @@ function getActiveLorebooks(conv, charObj) {
 
 function resolveSystemAndPersona(conv, draftText = '') {
   const charObj = conv?.characterId ? state.characters.find((c) => c.id === conv.characterId) : null;
+  const userName = state.settings.userName || (getLang() === 'en' ? 'User' : '你');
   const charPrompt = charObj ? buildCharacterPrompt(charObj, {
-    userName: state.settings.userName || (getLang() === 'en' ? 'User' : '你'),
+    userName,
     userGender: state.settings.userGender || '',
+    model: conv?.model || '',
+  }) : '';
+  const postHistoryText = charObj ? buildPostHistoryPrompt(charObj, {
+    userName,
     model: conv?.model || '',
   }) : '';
   const baseSys = expandPrompt(conv?.systemPrompt || '', conv?.model || '');
@@ -384,6 +394,7 @@ function resolveSystemAndPersona(conv, draftText = '') {
     scanDepth: 4,
     charName: charObj?.name || '',
     userName: state.settings.userName || '',
+    transformContent: (txt) => applyRegexScripts(txt, state.settings.regexScripts, PLACEMENT.WORLD_INFO),
   });
   const fullSystemText = [
     loreRes?.byPosition?.before_sys,
@@ -392,14 +403,17 @@ function resolveSystemAndPersona(conv, draftText = '') {
     loreRes?.byPosition?.before_char,
     charPrompt,
     loreRes?.byPosition?.after_char,
+    postHistoryText,
   ].filter(Boolean).join('\n\n');
-  return { charObj, charPrompt, baseSys, loreRes, fullSystemText };
+  const charTokens = (charPrompt ? estimateTokens(charPrompt) : 0) + (postHistoryText ? estimateTokens(postHistoryText) : 0);
+  const loreTokens = loreRes?.activeTokens || 0;
+  return { charObj, charPrompt, postHistoryText, charTokens, loreTokens, baseSys, loreRes, fullSystemText };
 }
 
 function computeContext(conv, draftText = '', draftImages = 0) {
   const p = conv.params;
   const limit = Math.max(512, Number(p.contextWindow) || 128000);
-  const { fullSystemText } = resolveSystemAndPersona(conv, draftText);
+  const { fullSystemText, postHistoryText, charTokens, loreTokens } = resolveSystemAndPersona(conv, draftText);
   const resolvedSys = fullSystemText;
   const sys = resolvedSys.trim() ? estimateTokens(resolvedSys) + 4 : 0;
   const reserve = p.enabled.max_tokens ? p.max_tokens : 0;
@@ -439,7 +453,7 @@ function computeContext(conv, draftText = '', draftImages = 0) {
   const included = [...compMsgs, ...includedActive];
   const used = sys + compTokens + history + input;
   return {
-    sys, comp: compTokens, history, input, reserve, used, total: used + reserve, limit,
+    sys, charTokens, loreTokens, postHistoryText, comp: compTokens, history, input, reserve, used, total: used + reserve, limit,
     includedIds: new Set(includedActive.map((m) => m.id)), included,
     includedActiveCount: includedActive.length,
     limitedByCount, trimmedByWindow, manualExcluded, totalMsgs: allNonErr.length,
@@ -970,6 +984,7 @@ function renderExtensionsPanel() {
     scanDepth: 4,
     charName: charObj?.name || '',
     userName: state.settings.userName || '',
+    transformContent: (txt) => applyRegexScripts(txt, state.settings.regexScripts, PLACEMENT.WORLD_INFO),
   });
   if (els.loreStatusHint) {
     if (scanRes.activeEntries.length > 0) {
@@ -1075,6 +1090,8 @@ function updateMeter() {
     <div class="meter-bar"><i class="seg sys"></i><i class="seg cmp"></i><i class="seg hist"></i><i class="seg inp"></i><i class="seg res"></i></div>
     <div class="ctx-rows">
       <i class="dot" style="background:var(--seg-sys)"></i><span>${t('ctxRowSys')}</span><span class="num">${formatTokens(ctx.sys)}</span>
+      ${ctx.charTokens ? `<i></i><span class="dim" style="padding-left:8px">↳ ${t('ctxRowChar')}</span><span class="num dim">${formatTokens(ctx.charTokens)}</span>` : ''}
+      ${ctx.loreTokens ? `<i></i><span class="dim" style="padding-left:8px">↳ ${t('ctxRowLore', '')}</span><span class="num dim">${formatTokens(ctx.loreTokens)}</span>` : ''}
       ${ctx.hasCompaction ? `<i class="dot" style="background:var(--seg-cmp)"></i><span>${t('ctxRowComp', ctx.archivedCount, ctx.savedTokens ? (isEn ? `saves ${formatTokens(ctx.savedTokens)}` : `省 ${formatTokens(ctx.savedTokens)}`) : '')}</span><span class="num">${formatTokens(ctx.comp)}</span>` : ''}
       <i class="dot" style="background:var(--seg-hist)"></i><span>${t('ctxRowHist', ctx.includedActiveCount, ctx.totalMsgs)}</span><span class="num">${formatTokens(ctx.history)}</span>
       <i class="dot" style="background:var(--seg-inp)"></i><span>${t('ctxRowInp')}</span><span class="num">${formatTokens(ctx.input)}</span>
@@ -1258,8 +1275,29 @@ async function generate(conv) {
         if (content) assistant.content += content;
         if (reasoning) assistant.reasoning += reasoning;
         if (searchStatus) assistant.searchStatus = searchStatus;
-        if (searchSources) assistant.searchSources = searchSources;
-        if (searchQueries) assistant.searchQueries = searchQueries;
+        if (searchSources?.length) {
+          const prev = assistant.searchSources || [];
+          const seenUrls = new Set(prev.map((s) => s.url).filter(Boolean));
+          const merged = [...prev];
+          for (const s of searchSources) {
+            if (!s.url || !seenUrls.has(s.url)) {
+              if (s.url) seenUrls.add(s.url);
+              merged.push(s);
+            }
+          }
+          assistant.searchSources = merged;
+        }
+        if (searchQueries?.length) {
+          const prevQ = assistant.searchQueries || [];
+          assistant.searchQueries = [...new Set([...prevQ, ...searchQueries])];
+        }
+        if (assistant.searchStatus?.status === 'done' && assistant.searchSources) {
+          assistant.searchStatus = {
+            ...assistant.searchStatus,
+            count: assistant.searchSources.length,
+            query: (assistant.searchQueries || []).join(', ') || assistant.searchStatus.query
+          };
+        }
         scheduleStreamRender(conv, assistant);
       },
     });
@@ -1673,7 +1711,15 @@ function applySystemPrompt(text) {
 async function exportAll() {
   const settings = clone(state.settings);
   if (!els.exportKeys.checked) settings.providers.forEach((p) => { p.apiKey = ''; });
-  const data = { app: 'nexus-chat', version: 1, exportedAt: new Date().toISOString(), settings, conversations: state.convs };
+  const data = {
+    app: 'nexus-chat',
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    settings,
+    conversations: state.convs,
+    characters: state.characters,
+    lorebooks: state.lorebooks,
+  };
   download(`nexus-chat-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(data, null, 2));
 }
 
@@ -1690,7 +1736,23 @@ async function importAll(file) {
       await db.put(c);
       added++;
     }
-    if (data.settings && confirm('备份中包含设置（API 提供商、提示词等），是否一并导入？\n（同 ID 的提供商将被覆盖，其余保留）')) {
+    if (Array.isArray(data.characters)) {
+      for (const ch of data.characters) {
+        if (!ch?.id) continue;
+        const i = state.characters.findIndex((x) => x.id === ch.id);
+        if (i >= 0) state.characters[i] = ch; else state.characters.push(ch);
+        await db.put('characters', ch);
+      }
+    }
+    if (Array.isArray(data.lorebooks)) {
+      for (const lb of data.lorebooks) {
+        if (!lb?.id) continue;
+        const i = state.lorebooks.findIndex((x) => x.id === lb.id);
+        if (i >= 0) state.lorebooks[i] = lb; else state.lorebooks.push(lb);
+        await db.put('lorebooks', lb);
+      }
+    }
+    if (data.settings && confirm('备份中包含设置（API 提供商、提示词、正则等），是否一并导入？\n（同 ID 的提供商将被覆盖，其余保留）')) {
       const s = data.settings;
       for (const p of s.providers || []) {
         const i = state.settings.providers.findIndex((x) => x.id === p.id);
@@ -1701,6 +1763,10 @@ async function importAll(file) {
       Object.assign(state.settings.modelMeta, s.modelMeta || {});
       if (typeof s.defaultSystemPrompt === 'string') state.settings.defaultSystemPrompt = s.defaultSystemPrompt;
       if (s.defaultParams) state.settings.defaultParams = mergeParams(s.defaultParams);
+      if (Array.isArray(s.regexScripts)) state.settings.regexScripts = s.regexScripts.map(normalizeRegexScript);
+      if (s.searchSettings) state.settings.searchSettings = { ...state.settings.searchSettings, ...s.searchSettings };
+      if (typeof s.userName === 'string') state.settings.userName = s.userName;
+      if (typeof s.userGender === 'string') state.settings.userGender = s.userGender;
       if (s.theme) state.settings.theme = s.theme;
       if (s.sendKey) state.settings.sendKey = s.sendKey;
       if (s.fontSize) state.settings.fontSize = Number(s.fontSize) || 15;
@@ -2386,7 +2452,7 @@ function selectChar(id) {
     if (els.ch_avatarFallback) { els.ch_avatarFallback.hidden = false; els.ch_avatarFallback.textContent = '👤'; }
     if (els.ch_name) els.ch_name.value = '';
     if (els.ch_tags) els.ch_tags.value = '';
-    if (els.ch_bookBadge) els.ch_bookBadge.textContent = '';
+    if (els.ch_bookBadge) { els.ch_bookBadge.hidden = true; els.ch_bookBadge.textContent = ''; }
     if (els.ch_first_mes) els.ch_first_mes.value = '';
     if (els.ch_alternate_greetings) els.ch_alternate_greetings.value = '';
     if (els.ch_description) els.ch_description.value = '';
@@ -2414,7 +2480,10 @@ function selectChar(id) {
   if (els.ch_tags) els.ch_tags.value = (c.tags || []).join(', ');
   if (els.ch_bookBadge) {
     const bookCount = c.character_book?.entries?.length ?? 0;
-    els.ch_bookBadge.textContent = bookCount > 0 ? `已内嵌世界书 (${bookCount} 条)` : '';
+    els.ch_bookBadge.hidden = !(bookCount > 0);
+    els.ch_bookBadge.textContent = bookCount > 0
+      ? (getLang() === 'en' ? `Embedded Lorebook (${bookCount})` : `已内嵌世界书 (${bookCount} 条)`)
+      : '';
   }
   if (els.ch_first_mes) els.ch_first_mes.value = c.first_mes || '';
   if (els.ch_alternate_greetings) els.ch_alternate_greetings.value = (c.alternate_greetings || []).join('\n---\n');
@@ -2568,17 +2637,32 @@ async function exportCharPng(id) {
   if (!c) return;
   let basePng = c.avatar;
   if (!basePng || !basePng.startsWith('data:image/png')) {
-    // 自动通过 Canvas 生成一张默认的占位立绘 PNG
     const canvas = document.createElement('canvas');
     canvas.width = 256; canvas.height = 256;
     const ctx = canvas.getContext('2d');
-    const grad = ctx.createLinearGradient(0, 0, 256, 256);
-    grad.addColorStop(0, '#6366f1'); grad.addColorStop(1, '#a855f7');
-    ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 80px sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText((c.name || 'C').slice(0, 2), 128, 128);
-    basePng = canvas.toDataURL('image/png');
+    let drewAvatar = false;
+    if (basePng && basePng.startsWith('data:image/')) {
+      try {
+        const img = new Image();
+        img.src = basePng;
+        await img.decode();
+        canvas.width = img.naturalWidth || 256;
+        canvas.height = img.naturalHeight || 256;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        basePng = canvas.toDataURL('image/png');
+        drewAvatar = true;
+      } catch {}
+    }
+    if (!drewAvatar) {
+      // 自动通过 Canvas 生成一张默认的占位立绘 PNG
+      const grad = ctx.createLinearGradient(0, 0, 256, 256);
+      grad.addColorStop(0, '#6366f1'); grad.addColorStop(1, '#a855f7');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
+      ctx.fillStyle = '#ffffff'; ctx.font = 'bold 80px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText((c.name || 'C').slice(0, 2), 128, 128);
+      basePng = canvas.toDataURL('image/png');
+    }
   }
   try {
     const blob = embedCharaInPng(basePng, c);
@@ -3050,10 +3134,9 @@ function saveRegex() {
   const r = state.settings.regexScripts?.find((x) => x.id === state.editingRegexId);
   if (!r) return;
   const pattern = els.rx_find.value;
-  try {
-    compileRegex(pattern);
-  } catch (e) {
-    toast('正则表达式格式错误: ' + e.message, 3000);
+  const { error } = compileRegex(pattern);
+  if (error) {
+    toast((getLang() === 'en' ? 'Invalid Regex: ' : '正则表达式格式错误: ') + error, 3000);
     return;
   }
   r.scriptName = els.rx_name.value.trim() || (getLang() === 'en' ? 'Unnamed Rule' : '未命名规则');
@@ -3139,11 +3222,25 @@ function runRegexTester() {
   };
   try {
     const res = testRegexScript(dummyScript, input);
+    if (res.error && dummyScript.findRegex.trim()) {
+      outBox.textContent = `(${getLang() === 'en' ? 'Regex Error' : '正则错误'}: ${res.error})`;
+      if (countBox) {
+        countBox.style.display = '';
+        countBox.textContent = getLang() === 'en' ? 'Syntax Error' : '语法错误';
+      }
+      return;
+    }
     outBox.textContent = res.output ?? '';
-    if (countBox) countBox.textContent = t('regexMatchCountLabel', res.matchCount) || `命中 ${res.matchCount} 处`;
+    if (countBox) {
+      countBox.style.display = input ? '' : 'none';
+      countBox.textContent = t('regexMatchCountLabel', res.matchCount) || `命中 ${res.matchCount} 处`;
+    }
   } catch (e) {
     outBox.textContent = '(匹配错误: ' + e.message + ')';
-    if (countBox) countBox.textContent = '语法错误';
+    if (countBox) {
+      countBox.style.display = '';
+      countBox.textContent = getLang() === 'en' ? 'Syntax Error' : '语法错误';
+    }
   }
 }
 
@@ -3279,8 +3376,8 @@ function bindEvents() {
     const copyBtn = e.target.closest('.copy-code');
     if (copyBtn) {
       copyText(copyBtn.closest('.code-block').querySelector('code').textContent);
-      copyBtn.textContent = '已复制';
-      setTimeout(() => { copyBtn.textContent = '复制'; }, 1500);
+      copyBtn.textContent = t('copiedCode');
+      setTimeout(() => { copyBtn.textContent = t('copyCode'); }, 1500);
       return;
     }
     const img = e.target.closest('.images img');
@@ -3468,8 +3565,9 @@ function bindEvents() {
     else {
       const item = els.providerList.querySelector(`.prov-item[data-id="${p.id}"]`);
       if (item) {
-        item.querySelector('.name').textContent = p.name || '(未命名)';
-        item.querySelector('.sub').textContent = `${PROVIDER_TYPES[p.type]} · ${p.models?.length ?? 0} 个模型`;
+        const isEn = getLang() === 'en';
+        item.querySelector('.name').textContent = p.name || (isEn ? '(Unnamed)' : '(未命名)');
+        item.querySelector('.sub').textContent = `${getProviderTypeName(p.type, getLang())} · ${isEn ? `${p.models?.length ?? 0} models` : `${p.models?.length ?? 0} 个模型`}`;
       }
       updateEndpointHint(p);
     }
@@ -3492,7 +3590,7 @@ function bindEvents() {
   els.pf_toggleKey.addEventListener('click', () => {
     const show = els.pf_apiKey.type === 'password';
     els.pf_apiKey.type = show ? 'text' : 'password';
-    els.pf_toggleKey.textContent = show ? '隐藏' : '显示';
+    els.pf_toggleKey.textContent = show ? (getLang() === 'en' ? 'Hide' : '隐藏') : (getLang() === 'en' ? 'Show' : '显示');
   });
   els.pf_fetchModels.addEventListener('click', fetchModels);
   els.pf_test.addEventListener('click', testProvider);

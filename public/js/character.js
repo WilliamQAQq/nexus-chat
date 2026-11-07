@@ -76,9 +76,33 @@ export function extractPngTextChunks(arrayBuffer) {
   return chunks;
 }
 
-export function embedCharaInPng(pngArrayBuffer, charaJson) {
-  const bytes = new Uint8Array(pngArrayBuffer);
-  const jsonStr = typeof charaJson === 'string' ? charaJson : JSON.stringify(charaJson);
+export function embedCharaInPng(pngInput, charaJson) {
+  let rawBytes;
+  if (typeof pngInput === 'string') {
+    const m = /^data:[^;]+;base64,(.*)$/s.exec(pngInput.trim());
+    const b64 = m ? m[1] : pngInput.trim();
+    const bin = atob(b64.replace(/\s+/g, ''));
+    rawBytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) rawBytes[i] = bin.charCodeAt(i);
+  } else if (pngInput instanceof Uint8Array) {
+    rawBytes = pngInput;
+  } else if (pngInput instanceof ArrayBuffer || ArrayBuffer.isView(pngInput)) {
+    rawBytes = new Uint8Array(pngInput.buffer || pngInput);
+  } else {
+    throw new Error('无效的 PNG 数据源');
+  }
+
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (rawBytes.length < 33 || sig.some((b, i) => rawBytes[i] !== b)) {
+    throw new Error('不是有效的 PNG 图片格式');
+  }
+
+  // 若传入的是内部角色对象（未包裹 spec: chara_card_v2），自动包装为标准 V2 结构
+  let payload = charaJson;
+  if (payload && typeof payload === 'object' && !payload.spec && !payload.data) {
+    payload = buildCharacterCardV2Object(payload);
+  }
+  const jsonStr = typeof payload === 'string' ? payload : JSON.stringify(payload);
   const b64Data = utf8ToBase64(jsonStr);
 
   const keyword = new TextEncoder().encode('chara');
@@ -104,14 +128,46 @@ export function embedCharaInPng(pngArrayBuffer, charaJson) {
   chunk[crcOffset + 2] = (crc >>> 8) & 0xff;
   chunk[crcOffset + 3] = crc & 0xff;
 
-  // 插入到 IHDR chunk 之后 (IHDR 长度 13，Chunk 总长 25 字节，从 8 + 25 = 33 插入)
-  const ihdrLen = ((bytes[8] << 24) | (bytes[9] << 16) | (bytes[10] << 8) | bytes[11]) >>> 0;
-  const insertPos = 8 + 12 + ihdrLen;
+  // 扫描现有 chunks，移除旧的 chara/ccv3 tEXt chunk，并在 IHDR 之后插入新 chunk
+  const keptChunks = [rawBytes.subarray(0, 8)];
+  let offset = 8;
+  let inserted = false;
+  const decoder = new TextDecoder('latin1');
 
-  const result = new Uint8Array(bytes.length + chunk.length);
-  result.set(bytes.subarray(0, insertPos), 0);
-  result.set(chunk, insertPos);
-  result.set(bytes.subarray(insertPos), insertPos + chunk.length);
+  while (offset + 12 <= rawBytes.length) {
+    const cLen = ((rawBytes[offset] << 24) | (rawBytes[offset + 1] << 16) | (rawBytes[offset + 2] << 8) | rawBytes[offset + 3]) >>> 0;
+    const type = String.fromCharCode(rawBytes[offset + 4], rawBytes[offset + 5], rawBytes[offset + 6], rawBytes[offset + 7]);
+    const totalChunkLen = 12 + cLen;
+    if (offset + totalChunkLen > rawBytes.length) {
+      keptChunks.push(rawBytes.subarray(offset));
+      break;
+    }
+    let skip = false;
+    if (type === 'tEXt') {
+      const chunkData = rawBytes.subarray(offset + 8, offset + 8 + cLen);
+      const nullIdx = chunkData.indexOf(0x00);
+      if (nullIdx !== -1) {
+        const kw = decoder.decode(chunkData.subarray(0, nullIdx));
+        if (kw === 'chara' || kw === 'ccv3') skip = true;
+      }
+    }
+    if (!skip) keptChunks.push(rawBytes.subarray(offset, offset + totalChunkLen));
+    if (type === 'IHDR' && !inserted) {
+      keptChunks.push(chunk);
+      inserted = true;
+    }
+    offset += totalChunkLen;
+    if (type === 'IEND') break;
+  }
+  if (!inserted) keptChunks.push(chunk);
+
+  const totalLen = keptChunks.reduce((sum, arr) => sum + arr.length, 0);
+  const result = new Uint8Array(totalLen);
+  let pos = 0;
+  for (const arr of keptChunks) {
+    result.set(arr, pos);
+    pos += arr.length;
+  }
   return result.buffer;
 }
 
@@ -227,21 +283,21 @@ export async function parseCharacterCardFile(file) {
   return parseCharacterCardJson(text);
 }
 
-export function exportCharacterCardV2(chara) {
+export function buildCharacterCardV2Object(chara) {
   return {
     spec: 'chara_card_v2',
     spec_version: '2.0',
     data: {
-      name: chara.name,
-      description: chara.description,
-      personality: chara.personality,
-      scenario: chara.scenario,
-      first_mes: chara.first_mes,
+      name: chara.name || '',
+      description: chara.description || '',
+      personality: chara.personality || '',
+      scenario: chara.scenario || '',
+      first_mes: chara.first_mes || '',
       alternate_greetings: chara.alternate_greetings || [],
-      mes_example: chara.mes_example,
-      system_prompt: chara.system_prompt,
-      post_history_instructions: chara.post_history_instructions,
-      creator_notes: chara.creator_notes,
+      mes_example: chara.mes_example || '',
+      system_prompt: chara.system_prompt || '',
+      post_history_instructions: chara.post_history_instructions || '',
+      creator_notes: chara.creator_notes || '',
       tags: chara.tags || [],
       character_book: chara.character_book || null,
       creator: chara.creator || '',
@@ -249,6 +305,10 @@ export function exportCharacterCardV2(chara) {
       extensions: {},
     },
   };
+}
+
+export function exportCharacterCardV2(chara) {
+  return JSON.stringify(buildCharacterCardV2Object(chara), null, 2);
 }
 
 // ======================= 宏替换与提示词拼接 =======================
@@ -292,4 +352,12 @@ export function buildCharacterPrompt(chara, opts = {}) {
   if (identity.length) parts.push(identity.join('\n\n'));
 
   return parts.join('\n\n---\n\n');
+}
+
+export function buildPostHistoryPrompt(chara, opts = {}) {
+  if (!chara?.post_history_instructions?.trim()) return '';
+  const charName = chara.name || 'AI';
+  const userName = opts.userName || '你';
+  const model = opts.model || '';
+  return expandCharacterMacros(chara.post_history_instructions.trim(), { charName, userName, model });
 }

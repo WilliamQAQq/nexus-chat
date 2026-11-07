@@ -251,6 +251,7 @@ export function parseLorebookJson(raw, defaultName = '未命名世界书') {
     name: (data.name || data.title || defaultName).trim(),
     description: (data.description || data.archetype || '').trim(),
     scan_depth: Math.max(0, Math.round(Number(data.scan_depth ?? data.scanDepth ?? 5))),
+    recursive_scanning: data.recursive_scanning !== false,
     entries: entriesList,
     createdAt: data.createdAt || Date.now(),
     updatedAt: Date.now(),
@@ -259,10 +260,10 @@ export function parseLorebookJson(raw, defaultName = '未命名世界书') {
   return normalized;
 }
 
-export function exportLorebookJson(book) {
-  // 按照 SillyTavern 标准 World Info 字典导出
+export function buildLorebookJsonObject(book) {
+  // 按照 SillyTavern 标准 World Info 字典构建
   const entriesMap = {};
-  book.entries.forEach((e, idx) => {
+  (book.entries || []).forEach((e, idx) => {
     entriesMap[String(idx)] = {
       uid: idx,
       key: e.keys,
@@ -281,8 +282,13 @@ export function exportLorebookJson(book) {
     name: book.name,
     description: book.description,
     scan_depth: book.scan_depth,
+    recursive_scanning: book.recursive_scanning !== false,
     entries: entriesMap,
   };
+}
+
+export function exportLorebookJson(book) {
+  return JSON.stringify(buildLorebookJsonObject(book), null, 2);
 }
 
 // ======================= 关键词匹配引擎 =======================
@@ -321,41 +327,67 @@ export function isLoreEntryTriggered(entry, scanText) {
 }
 
 // ======================= 上下文扫描与注入 =======================
-export function scanLorebooks(lorebooks, { messages = [], draftText = '', scanDepth = 5, charName = '', userName = '' } = {}) {
+export function scanLorebooks(
+  lorebooks,
+  { messages = [], draftText = '', scanDepth = 5, charName = '', userName = '', transformContent = null } = {}
+) {
   const books = Array.isArray(lorebooks) ? lorebooks.filter(Boolean) : [lorebooks].filter(Boolean);
   if (!books.length) {
     return { activeEntries: [], activeTokens: 0, injectedText: '', byPosition: { before_sys: '', after_sys: '', before_char: '', after_char: '' } };
   }
 
-  // 构建扫描文本窗口：包含输入草稿 + 最近 scanDepth 条消息内容
-  const scanParts = [draftText];
-  const depth = scanDepth > 0 ? scanDepth : messages.length;
-  const recent = messages.filter((m) => !m.error && !m.pending && m.content).slice(-depth);
-  recent.forEach((m) => scanParts.push(m.content));
-  const scanText = scanParts.join('\n\n');
+  const validMessages = messages.filter((m) => !m.error && !m.pending && m.content);
+  const buildScanWindow = (depthVal) => {
+    const parts = [draftText];
+    const d = depthVal > 0 ? depthVal : validMessages.length;
+    const recent = validMessages.slice(-d);
+    recent.forEach((m) => parts.push(m.content));
+    return parts.join('\n\n');
+  };
 
   const triggered = [];
   const seenContent = new Set();
+  const triggeredEntryIds = new Set();
 
-  for (const book of books) {
-    for (const entry of book.entries || []) {
-      if (isLoreEntryTriggered(entry, scanText)) {
-        const expanded = expandCharacterMacros(entry.content, { charName, userName });
-        if (!seenContent.has(expanded)) {
-          seenContent.add(expanded);
-          triggered.push({
-            bookId: book.id,
-            bookName: book.name,
-            entryId: entry.id,
-            name: entry.name,
-            position: entry.position || 'after_sys',
-            order: entry.order ?? 100,
-            content: expanded,
-            tokens: estimateTokens(expanded),
-          });
+  // 支持多轮递归扫描（词条 A 触发后，其内容中的关键词可继续触发词条 B，最多 3 轮防死循环）
+  let recursiveText = '';
+  for (let pass = 0; pass < 3; pass++) {
+    let newlyAddedText = [];
+    for (const book of books) {
+      if (pass > 0 && book.recursive_scanning === false) continue;
+      const bookDepth = Number.isFinite(Number(book.scan_depth)) ? Number(book.scan_depth) : scanDepth;
+      const baseText = buildScanWindow(bookDepth);
+      const currentScanText = recursiveText ? `${baseText}\n\n${recursiveText}` : baseText;
+
+      for (const entry of book.entries || []) {
+        const entryKey = `${book.id || book.name}:${entry.id || entry.name}`;
+        if (triggeredEntryIds.has(entryKey)) continue;
+
+        if (isLoreEntryTriggered(entry, currentScanText)) {
+          triggeredEntryIds.add(entryKey);
+          let expanded = expandCharacterMacros(entry.content, { charName, userName });
+          if (typeof transformContent === 'function') {
+            expanded = transformContent(expanded);
+          }
+          if (expanded && !seenContent.has(expanded)) {
+            seenContent.add(expanded);
+            newlyAddedText.push(expanded);
+            triggered.push({
+              bookId: book.id,
+              bookName: book.name,
+              entryId: entry.id,
+              name: entry.name,
+              position: entry.position || 'after_sys',
+              order: entry.order ?? 100,
+              content: expanded,
+              tokens: estimateTokens(expanded),
+            });
+          }
         }
       }
     }
+    if (!newlyAddedText.length) break;
+    recursiveText = recursiveText ? `${recursiveText}\n\n${newlyAddedText.join('\n\n')}` : newlyAddedText.join('\n\n');
   }
 
   // 按 order 升序排序

@@ -79,6 +79,11 @@ export function compileRegex(findRegex) {
   }
 }
 
+function unescapeReplaceString(rep) {
+  if (typeof rep !== 'string') return '';
+  return rep.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
+}
+
 export function applyRegexScripts(text, scripts = [], placementCode = PLACEMENT.DISPLAY_MARKDOWN) {
   if (!text || !Array.isArray(scripts) || !scripts.length) return text;
 
@@ -92,7 +97,7 @@ export function applyRegexScripts(text, scripts = [], placementCode = PLACEMENT.
     if (error || !regex) continue;
 
     try {
-      const rep = item.replaceString ?? '';
+      const rep = unescapeReplaceString(item.replaceString ?? '');
       result = result.replace(regex, rep);
     } catch {
       // 容错：单个正则执行异常不中断主流程
@@ -110,7 +115,8 @@ export function testRegexScript(script, sampleText = '') {
   try {
     const matches = sampleText.match(regex);
     const matchCount = matches ? matches.length : 0;
-    const output = sampleText.replace(regex, script.replaceString ?? '');
+    const rep = unescapeReplaceString(script.replaceString ?? '');
+    const output = sampleText.replace(regex, rep);
     return { output, matchCount, error: null };
   } catch (err) {
     return { output: sampleText, matchCount: 0, error: err.message };
@@ -138,7 +144,7 @@ export function parseRegexScriptsJson(raw) {
 }
 
 export function exportRegexScriptsJson(scripts) {
-  return scripts.map((s) => ({
+  const list = (scripts || []).map((s) => ({
     id: s.id,
     scriptName: s.scriptName,
     findRegex: s.findRegex,
@@ -147,4 +153,5 @@ export function exportRegexScriptsJson(scripts) {
     disabled: s.disabled,
     runOnEdit: s.runOnEdit,
   }));
+  return JSON.stringify(list, null, 2);
 }

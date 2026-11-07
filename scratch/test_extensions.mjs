@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   utf8ToBase64, base64ToUtf8, embedCharaInPng, extractPngTextChunks,
-  parseCharacterCardJson, expandCharacterMacros, buildCharacterPrompt
+  parseCharacterCardJson, exportCharacterCardV2, expandCharacterMacros,
+  buildCharacterPrompt, buildPostHistoryPrompt
 } from '../public/js/character.js';
 import {
   parseLorebookJson, exportLorebookJson, isLoreEntryTriggered, scanLorebooks
@@ -19,17 +20,15 @@ const sampleText = '你好，世界！Character Card Test: 123 🔥';
 const b64 = utf8ToBase64(sampleText);
 assert.equal(base64ToUtf8(b64), sampleText);
 
-// Create minimal valid PNG header (13-byte IHDR)
-// 8-byte signature + 4-byte len(13) + 4-byte IHDR + 13-byte data + 4-byte CRC + 4-byte len(0) + 4-byte IEND + 4-byte CRC
 const minPng = new Uint8Array([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // Sig
-  0x00, 0x00, 0x00, 0x0d, // IHDR len = 13
-  0x49, 0x48, 0x44, 0x52, // 'IHDR'
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, // 1x1 RGBA
-  0x1f, 0x15, 0xc4, 0x89, // CRC
-  0x00, 0x00, 0x00, 0x00, // IEND len = 0
-  0x49, 0x45, 0x4e, 0x44, // 'IEND'
-  0xae, 0x42, 0x60, 0x82  // CRC
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  0x00, 0x00, 0x00, 0x0d,
+  0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00,
+  0x1f, 0x15, 0xc4, 0x89,
+  0x00, 0x00, 0x00, 0x00,
+  0x49, 0x45, 0x4e, 0x44,
+  0xae, 0x42, 0x60, 0x82
 ]);
 
 const cardV2Data = {
@@ -67,6 +66,23 @@ assert.equal(expanded, '嗨！旅行者，你也对这本尘封的古代日记�
 const prompt = buildCharacterPrompt(parsedFromPng, { userName: '旅行者' });
 assert.ok(prompt.includes('爱丽丝 (Alice)'));
 assert.ok(prompt.includes('古老的图书馆'));
+
+// Test Data URL input to embedCharaInPng + raw character object auto-V2 wrapping + post_history_instructions
+const dataUrlPng = 'data:image/png;base64,' + Buffer.from(minPng).toString('base64');
+parsedFromPng.post_history_instructions = '请始终保持{{char}}对{{user}}的好奇心。';
+const reEmbeddedBuf = embedCharaInPng(dataUrlPng, parsedFromPng);
+const reExtracted = extractPngTextChunks(reEmbeddedBuf);
+assert.ok(reExtracted.chara, 'PNG chara chunk from Data URL should exist');
+const reParsed = parseCharacterCardJson(base64ToUtf8(reExtracted.chara));
+assert.equal(reParsed.name, '爱丽丝 (Alice)');
+assert.equal(reParsed.post_history_instructions, '请始终保持{{char}}对{{user}}的好奇心。');
+
+const postHist = buildPostHistoryPrompt(reParsed, { userName: '旅行者' });
+assert.ok(postHist.includes('请始终保持爱丽丝 (Alice)对旅行者的好奇心。'));
+
+const exportedCharStr = exportCharacterCardV2(reParsed);
+assert.equal(typeof exportedCharStr, 'string');
+assert.equal(JSON.parse(exportedCharStr).spec, 'chara_card_v2');
 console.log('✓ Character module passed!');
 
 // 2. Lorebook module test
@@ -78,7 +94,7 @@ const lorebookJson = {
     "0": {
       comment: '黄金律法',
       key: ['黄金树', '黄金律法'],
-      content: '黄金律法是这片交界地的最高法则，维系着生死的秩序。',
+      content: '黄金律法是这片交界地的最高法则，由玛莉卡女王与神坛赐福共同维系。',
       constant: false,
       selective: false,
       order: 10
@@ -106,27 +122,22 @@ const lb = parseLorebookJson(lorebookJson);
 assert.equal(lb.entries.length, 3);
 assert.equal(lb.entries.find(e => e.constant).content, '交界地所有人死后灵魂都将归于黄金树根。');
 
-// Test matching: constant entry triggers unconditionally
 assert.ok(isLoreEntryTriggered(lb.entries[2], '完全无关的内容'));
-
-// Test primary match: "黄金树" matches
 assert.ok(isLoreEntryTriggered(lb.entries[0], '你仰望着远处高耸的黄金树。'));
 assert.equal(isLoreEntryTriggered(lb.entries[0], '这里的风景真好。'), false);
-
-// Test selective match: "玛莉卡" alone should NOT trigger because selective requires secondary key
 assert.equal(isLoreEntryTriggered(lb.entries[1], '传说中的玛莉卡女王究竟在哪里？'), false);
-// Both primary "玛莉卡" and secondary "赐福" match -> triggers!
 assert.ok(isLoreEntryTriggered(lb.entries[1], '玛莉卡女王留下的赐福依然指引着我们。'));
 
-// Test scanLorebooks
+// Test scanLorebooks including recursive scanning (entry 0 mentions "玛莉卡女王" + "神坛" + "赐福", which recursively triggers entry 1!)
 const scanRes = scanLorebooks([lb], {
   messages: [{ role: 'user', content: '我们现在来到了黄金树脚下。' }],
   draftText: '',
-  scanDepth: 3
+  scanDepth: 3,
+  transformContent: (txt) => txt.replace('无上意志', '【至高意志】')
 });
-assert.ok(scanRes.activeEntries.length >= 2); // 常驻常识 + 黄金树
+assert.equal(scanRes.activeEntries.length, 3); // 常驻常识 + 黄金树 + 递归触发的玛莉卡女王
 assert.ok(scanRes.injectedText.includes('黄金律法'));
-assert.ok(scanRes.injectedText.includes('黄金树根'));
+assert.ok(scanRes.injectedText.includes('【至高意志】'));
 console.log('✓ Lorebook module passed!');
 
 // 3. Regex module test
@@ -160,13 +171,23 @@ const scripts = parseRegexScriptsJson([
 
 const rawText = '<think>思考一下这个难题...</think>*微笑点头* 很高兴认识你！foo';
 const dispRes = applyRegexScripts(rawText, scripts, PLACEMENT.DISPLAY_MARKDOWN);
-assert.equal(dispRes, '[微笑点头] 很高兴认识你！foo'); // think stripped, *actions* converted to [actions], foo NOT replaced because r3 is disabled
+assert.equal(dispRes, '[微笑点头] 很高兴认识你！foo');
 
 // Live tester test
 const testResult = testRegexScript(scripts[1], '*轻轻挥手* 再见！');
 assert.equal(testResult.matchCount, 1);
 assert.equal(testResult.output, '[轻轻挥手] 再见！');
 assert.equal(testResult.error, null);
+
+// Escape sequence (\n) in replaceString + JSON export string check
+const nlRes = testRegexScript({ findRegex: '/\\s*\\|\\s*/g', replaceString: '\\n' }, '第一行 | 第二行');
+assert.equal(nlRes.output, '第一行\n第二行');
+const exportedRxStr = exportRegexScriptsJson(scripts);
+assert.equal(typeof exportedRxStr, 'string');
+assert.equal(JSON.parse(exportedRxStr).length, 3);
+const exportedLbStr = exportLorebookJson(lb);
+assert.equal(typeof exportedLbStr, 'string');
+assert.equal(JSON.parse(exportedLbStr).name, '奇幻大陆世界书');
 
 console.log('✓ Regex module passed!');
 console.log('--- ALL EXTENSION TESTS PASSED (3/3) ---');
