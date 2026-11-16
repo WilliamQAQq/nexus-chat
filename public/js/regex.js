@@ -65,10 +65,16 @@ export function compileRegex(findRegex) {
     return { regex: null, error: '正则表达式不能为空' };
   }
   const s = findRegex.trim();
+  if (!s) {
+    return { regex: null, error: '正则表达式不能为空' };
+  }
   try {
     if (s.startsWith('/') && s.lastIndexOf('/') > 0) {
       const lastSlash = s.lastIndexOf('/');
       const pattern = s.slice(1, lastSlash);
+      if (!pattern) {
+        return { regex: null, error: '正则表达式不能为空' };
+      }
       const flags = s.slice(lastSlash + 1);
       return { regex: new RegExp(pattern, flags), error: null };
     }
@@ -81,7 +87,13 @@ export function compileRegex(findRegex) {
 
 function unescapeReplaceString(rep) {
   if (typeof rep !== 'string') return '';
-  return rep.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r');
+  return rep.replace(/\\(\\|n(?![a-zA-Z])|t(?![a-zA-Z])|r(?![a-zA-Z]))/g, (full, ch) => {
+    if (ch === '\\') return '\\';
+    if (ch === 'n') return '\n';
+    if (ch === 't') return '\t';
+    if (ch === 'r') return '\r';
+    return full;
+  });
 }
 
 export function applyRegexScripts(text, scripts = [], placementCode = PLACEMENT.DISPLAY_MARKDOWN) {
@@ -114,7 +126,7 @@ export function testRegexScript(script, sampleText = '') {
 
   try {
     const matches = sampleText.match(regex);
-    const matchCount = matches ? matches.length : 0;
+    const matchCount = matches ? (regex.global ? matches.length : 1) : 0;
     const rep = unescapeReplaceString(script.replaceString ?? '');
     const output = sampleText.replace(regex, rep);
     return { output, matchCount, error: null };
@@ -128,17 +140,17 @@ export function normalizeRegexScript(raw = {}) {
   const p = Array.isArray(raw.placement) ? raw.placement : (raw.placement != null ? [raw.placement] : [0, 1]);
   return {
     id: raw.id || uid(),
-    scriptName: (raw.scriptName || raw.name || '未命名正则').trim(),
+    scriptName: String(raw.scriptName || raw.name || '未命名正则').trim() || '未命名正则',
     findRegex: raw.findRegex || raw.find || '',
     replaceString: raw.replaceString ?? raw.replace ?? '',
-    placement: p.map(Number),
+    placement: p.map(Number).filter(Number.isFinite),
     disabled: !!raw.disabled,
     runOnEdit: raw.runOnEdit !== false,
   };
 }
 
 export function parseRegexScriptsJson(raw) {
-  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const data = typeof raw === 'string' ? JSON.parse(raw.replace(/^\uFEFF/, '')) : raw;
   const list = Array.isArray(data) ? data : (data.scripts || [data]);
   return list.map(normalizeRegexScript);
 }

@@ -1,4 +1,6 @@
 // 安全的轻量 Markdown 渲染器：先转义所有文本，再生成受控标签集合，输出不含任何用户可控的未转义 HTML。
+import { t } from './i18n.js';
+
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 export const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC[c]);
 
@@ -29,8 +31,8 @@ function inline(text) {
     (_, alt, u) => hold(`<img src="${u}" alt="${alt}" loading="lazy">`));
   s = s.replace(/\[([^\]]+)\]\((https?:\/\/(?:[^\s()]|\([^\s()]*\))+)\)/g,
     (_, t, u) => hold(`<a href="${u}" target="_blank" rel="noopener noreferrer">${styleText(t)}</a>`));
-  // 4. 裸 URL 自动转链接
-  s = s.replace(/(^|[\s(（])(https?:\/\/[^\s<>()（）\uE000]+[^\s<>()（）\uE000.,;:!?。，；：！？])/g,
+  // 4. 裸 URL 自动转链接（剥离末尾被 esc 转义的引号/尖括号实体及标点，避免污染 href）
+  s = s.replace(/(^|[\s(（]|&(?:quot|#39|lt|gt);)(https?:\/\/[^\s<>()（）\uE000]+?)(?=(?:&(?:quot|#39|lt|gt);|[.,;:!?。，；：！？])*(?:[\s)）]|$))/g,
     (_, pre, u) => `${pre}${hold(`<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`)}`);
   // 5. 强调与删除线
   s = styleText(s);
@@ -42,8 +44,9 @@ function inline(text) {
 }
 
 function codeBlock(code, lang) {
+  const copyLabel = t('copyCode') || '复制';
   return `<div class="code-block"><div class="code-head"><span>${esc(lang || 'text')}</span>` +
-    `<button class="copy-code" type="button">复制</button></div><pre><code>${esc(code)}</code></pre></div>`;
+    `<button class="copy-code" type="button">${esc(copyLabel)}</button></div><pre><code>${esc(code)}</code></pre></div>`;
 }
 
 const LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;

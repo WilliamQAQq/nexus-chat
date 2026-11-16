@@ -213,22 +213,29 @@ export function normalizeLorebookEntry(e = {}) {
     return [];
   };
 
+  const keys = parseKeys(e.keys ?? e.key);
+  const secondary_keys = parseKeys(e.secondary_keys ?? e.secondarykeys ?? e.keysecondary);
+  const rawName = e.comment || e.name || keys[0] || '未命名条目';
+
   return {
     id: e.id || e.uid || uid(),
-    name: (e.comment || e.name || e.key || '未命名条目').trim(),
-    keys: parseKeys(e.keys || e.key),
-    secondary_keys: parseKeys(e.secondary_keys || e.secondarykeys || e.keysecondary),
-    selective: !!(e.selective || (e.secondary_keys?.length && e.selective !== false)),
+    name: String(rawName).trim() || '未命名条目',
+    keys,
+    secondary_keys,
+    selective: !!(e.selective || (secondary_keys.length && e.selective !== false)),
     constant: !!(e.constant || e.always_active),
     enabled: e.enabled !== false && e.disable !== true,
     position: e.position || 'after_sys', // 'before_sys' | 'after_sys' | 'before_char' | 'after_char'
     order: Number.isFinite(Number(e.order ?? e.insertion_order)) ? Number(e.order ?? e.insertion_order) : 100,
-    content: (e.content || '').trim(),
+    content: String(e.content ?? '').trim(),
   };
 }
 
 export function parseLorebookJson(raw, defaultName = '未命名世界书') {
-  const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const parsed = typeof raw === 'string' ? JSON.parse(raw.replace(/^\uFEFF/, '')) : raw;
+  const data = (parsed?.spec && parsed?.data?.character_book)
+    ? parsed.data.character_book
+    : (parsed?.character_book || parsed || {});
   const rawEntries = data.entries || data.items;
   let entriesList = [];
 
@@ -246,11 +253,16 @@ export function parseLorebookJson(raw, defaultName = '未命名世界书') {
     entriesList = convertArbitraryJsonToLoreEntries(data).map(normalizeLorebookEntry);
   }
 
+  const rawDepth = data.scan_depth ?? data.scanDepth;
+  const scanDepthVal = (rawDepth !== undefined && rawDepth !== null && rawDepth !== '' && Number.isFinite(Number(rawDepth)))
+    ? Math.max(0, Math.round(Number(rawDepth)))
+    : 5;
+
   const normalized = {
     id: data.id || uid(),
-    name: (data.name || data.title || defaultName).trim(),
-    description: (data.description || data.archetype || '').trim(),
-    scan_depth: Math.max(0, Math.round(Number(data.scan_depth ?? data.scanDepth ?? 5))),
+    name: String(data.name || data.title || parsed?.data?.name || defaultName).trim() || defaultName,
+    description: String(data.description || data.archetype || '').trim(),
+    scan_depth: scanDepthVal,
     recursive_scanning: data.recursive_scanning !== false,
     entries: entriesList,
     createdAt: data.createdAt || Date.now(),
@@ -309,7 +321,11 @@ function testKey(key, text) {
   return text.toLowerCase().includes(key.toLowerCase());
 }
 
-export function isLoreEntryTriggered(entry, scanText) {
+export function isLoreEntryTriggered(rawEntry, scanText) {
+  if (!rawEntry) return false;
+  const entry = (Array.isArray(rawEntry.keys) && typeof rawEntry.enabled === 'boolean')
+    ? rawEntry
+    : normalizeLorebookEntry(rawEntry);
   if (!entry.enabled || !entry.content) return false;
   if (entry.constant) return true;
   if (!entry.keys?.length) return false;
@@ -355,12 +371,20 @@ export function scanLorebooks(
     let newlyAddedText = [];
     for (const book of books) {
       if (pass > 0 && book.recursive_scanning === false) continue;
-      const bookDepth = Number.isFinite(Number(book.scan_depth)) ? Number(book.scan_depth) : scanDepth;
+      const hasBookDepth = book.scan_depth !== undefined && book.scan_depth !== null && book.scan_depth !== '' && Number.isFinite(Number(book.scan_depth));
+      const bookDepth = hasBookDepth ? Math.max(0, Math.round(Number(book.scan_depth))) : scanDepth;
       const baseText = buildScanWindow(bookDepth);
       const currentScanText = recursiveText ? `${baseText}\n\n${recursiveText}` : baseText;
 
-      for (const entry of book.entries || []) {
-        const entryKey = `${book.id || book.name}:${entry.id || entry.name}`;
+      const rawEntries = book.entries
+        ? (Array.isArray(book.entries) ? book.entries : Object.values(book.entries))
+        : [];
+      for (let idx = 0; idx < rawEntries.length; idx++) {
+        const rawEntry = rawEntries[idx];
+        const entry = (rawEntry && Array.isArray(rawEntry.keys) && typeof rawEntry.enabled === 'boolean')
+          ? rawEntry
+          : normalizeLorebookEntry(rawEntry);
+        const entryKey = `${book.id || book.name}:${entry.id || idx}:${entry.name || ''}`;
         if (triggeredEntryIds.has(entryKey)) continue;
 
         if (isLoreEntryTriggered(entry, currentScanText)) {

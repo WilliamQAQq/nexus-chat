@@ -82,6 +82,16 @@ async function handleProxy(req, res) {
   }
 }
 
+function decodeHtmlEntities(str = '') {
+  return str
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&#x27;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&');
+}
+
 async function searchBing(query) {
   const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
   const res = await fetch(url, {
@@ -93,23 +103,22 @@ async function searchBing(query) {
   if (!res.ok) throw new Error(`Bing returned ${res.status}`);
   const html = await res.text();
   const results = [];
-  const blockRegex = /<li class="b_algo"[^>]*>([\s\S]*?)<\/li>/gi;
-  let blockMatch;
-  while ((blockMatch = blockRegex.exec(html)) !== null && results.length < 6) {
-    const block = blockMatch[1];
-    const linkMatch = /<h2><a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>/i.exec(block);
+  const blocks = html.split(/<li\s+class="b_algo\b[^>]*>/i).slice(1);
+  for (const block of blocks) {
+    if (results.length >= 6) break;
+    const linkMatch = /<h2>\s*<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>\s*<\/h2>/i.exec(block);
     if (!linkMatch) continue;
     const capMatch = /<div class="b_caption"[^>]*>[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i.exec(block) || /<p[^>]*>([\s\S]*?)<\/p>/i.exec(block);
-    let rawUrl = linkMatch[1].replace(/&amp;/g, '&');
+    let rawUrl = decodeHtmlEntities(linkMatch[1]);
     try {
       const u = new URL(rawUrl);
       const p = u.searchParams.get('u');
       if (p && p.startsWith('a1')) {
-        rawUrl = Buffer.from(p.slice(2), 'base64').toString('utf8');
+        rawUrl = Buffer.from(p.slice(2), 'base64url').toString('utf8');
       }
     } catch {}
-    const title = linkMatch[2].replace(/<[^>]+>/g, '').trim();
-    const snippet = (capMatch ? capMatch[1] : '').replace(/<[^>]+>/g, '').trim();
+    const title = decodeHtmlEntities(linkMatch[2].replace(/<[^>]+>/g, '')).trim();
+    const snippet = decodeHtmlEntities((capMatch ? capMatch[1] : '').replace(/<[^>]+>/g, '')).trim();
     if (title && snippet) results.push({ title, snippet, url: rawUrl });
   }
   return results;

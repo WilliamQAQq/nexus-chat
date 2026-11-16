@@ -208,6 +208,33 @@ function normalizeTurns(messages) {
   return out;
 }
 
+function extractSearchQueryFromArgs(rawArgs) {
+  if (!rawArgs) return '';
+  if (typeof rawArgs === 'object') {
+    return String(rawArgs.query || rawArgs.q || rawArgs.keywords || rawArgs.keyword || '').trim();
+  }
+  try {
+    const parsed = JSON.parse(rawArgs);
+    if (typeof parsed === 'string') return parsed.trim();
+    if (parsed && typeof parsed === 'object') {
+      return String(parsed.query || parsed.q || parsed.keywords || parsed.keyword || '').trim();
+    }
+  } catch {
+    return String(rawArgs).trim();
+  }
+  return '';
+}
+
+function mergeUsage(u1, u2) {
+  if (!u1 && !u2) return null;
+  if (!u1) return u2;
+  if (!u2) return u1;
+  return {
+    prompt: (u1.prompt || 0) + (u2.prompt || 0),
+    completion: (u1.completion || 0) + (u2.completion || 0),
+  };
+}
+
 // 执行 OpenAI 工具调用列表（支持单轮并行多次调用 web_search，并为所有 tool_call_id 生成对应 tool 消息）
 async function executeOpenAIToolCalls(rawToolCalls, { params, signal, onDelta }) {
   const normalizedCalls = rawToolCalls.filter(Boolean).map((tc, i) => ({
@@ -222,12 +249,7 @@ async function executeOpenAIToolCalls(rawToolCalls, { params, signal, onDelta })
   const toolMessages = [];
   for (const tc of normalizedCalls) {
     if (tc.function.name === 'web_search') {
-      let query = '';
-      try {
-        query = JSON.parse(tc.function.arguments || '{}').query || '';
-      } catch {
-        query = tc.function.arguments || '';
-      }
+      const query = extractSearchQueryFromArgs(tc.function.arguments);
       if (query) {
         onDelta({ searchStatus: { status: 'searching', query } });
         const sRes = await searchWeb(query, {
@@ -315,6 +337,7 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
   if (!params.stream) {
     const j = await res.json();
     const msg = j.choices?.[0]?.message ?? {};
+    const curUsage = toUsage(j.usage);
     const hasWebSearch = msg.tool_calls?.some((tc) => tc?.function?.name === 'web_search');
     if (hasWebSearch && allowTools) {
       const { normalizedCalls, toolMessages } = await executeOpenAIToolCalls(msg.tool_calls, { params, signal, onDelta });
@@ -323,10 +346,12 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
         { role: 'assistant', content: msg.content || null, tool_calls: normalizedCalls },
         ...toolMessages
       ];
-      return chatOpenAI({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
+      const nextRes = await chatOpenAI({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
+      if (nextRes) nextRes.usage = mergeUsage(curUsage, nextRes.usage);
+      return nextRes;
     }
     onDelta({ content: msg.content ?? '', reasoning: msg.reasoning_content ?? msg.reasoning ?? '' });
-    return { usage: toUsage(j.usage), finish: j.choices?.[0]?.finish_reason };
+    return { usage: curUsage, finish: j.choices?.[0]?.finish_reason };
   }
 
   let usage = null;
@@ -351,7 +376,15 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
       }
       if (c.delta.tool_calls) {
         for (const tc of c.delta.tool_calls) {
-          const idx = tc.index ?? 0;
+          let idx = tc.index;
+          if (idx == null) {
+            if (tc.id) {
+              const existingIdx = accToolCalls.findIndex((x) => x && x.id === tc.id);
+              idx = existingIdx >= 0 ? existingIdx : (accToolCalls.length && accToolCalls[accToolCalls.length - 1]?.id ? accToolCalls.length : Math.max(0, accToolCalls.length - 1));
+            } else {
+              idx = Math.max(0, accToolCalls.length - 1);
+            }
+          }
           if (!accToolCalls[idx]) {
             accToolCalls[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
           }
@@ -381,12 +414,7 @@ async function chatOpenAI({ provider, model, system, messages, params, signal, o
     const nextRes = await chatOpenAI({
       provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
     });
-    if (usage && nextRes?.usage) {
-      nextRes.usage = {
-        prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
-        completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
-      };
-    }
+    if (nextRes) nextRes.usage = mergeUsage(usage, nextRes.usage);
     return nextRes;
   }
 
@@ -431,12 +459,7 @@ function toAnthropicMessage(m) {
 async function executeAnthropicToolUses(toolUses, { params, signal, onDelta }) {
   const toolResults = [];
   for (const tu of toolUses) {
-    let query = '';
-    try {
-      query = (typeof tu.input === 'object' ? tu.input?.query : JSON.parse(tu.input || '{}').query) || '';
-    } catch {
-      query = typeof tu.input === 'string' ? tu.input : '';
-    }
+    const query = extractSearchQueryFromArgs(tu.input);
     if (tu.name === 'web_search' && query) {
       onDelta({ searchStatus: { status: 'searching', query } });
       const sRes = await searchWeb(query, {
@@ -490,6 +513,7 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
     let content = '';
     let reasoning = '';
     const toolUses = [];
+    const curUsage = j.usage ? { prompt: j.usage.input_tokens, completion: j.usage.output_tokens } : null;
     for (const b of j.content || []) {
       if (b.type === 'text') content += b.text;
       else if (b.type === 'thinking') reasoning += b.thinking;
@@ -502,17 +526,20 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
         { role: 'assistant', anthropicContent: j.content },
         { role: 'user', toolResults }
       ];
-      return chatAnthropic({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
+      const nextRes = await chatAnthropic({ provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1 });
+      if (nextRes) nextRes.usage = mergeUsage(curUsage, nextRes.usage);
+      return nextRes;
     }
     onDelta({ content, reasoning });
-    return { usage: j.usage ? { prompt: j.usage.input_tokens, completion: j.usage.output_tokens } : null, finish: j.stop_reason };
+    return { usage: curUsage, finish: j.stop_reason };
   }
 
   const usage = { prompt: 0, completion: 0 };
   let finish = null;
   let accContent = '';
   const toolUses = [];
-  let currentToolUse = null;
+  const streamBlocks = [];
+  let currentBlock = null;
 
   for await (const data of sse(res)) {
     const j = parseJSON(data);
@@ -523,25 +550,40 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
         usage.prompt = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
         break;
       }
-      case 'content_block_start':
-        if (j.content_block?.type === 'tool_use') {
-          currentToolUse = { id: j.content_block.id, name: j.content_block.name, input: '' };
+      case 'content_block_start': {
+        const cb = j.content_block;
+        if (cb?.type === 'tool_use') {
+          currentBlock = { type: 'tool_use', id: cb.id, name: cb.name, input: '' };
+        } else if (cb?.type === 'thinking') {
+          currentBlock = { type: 'thinking', thinking: cb.thinking || '', signature: cb.signature || '' };
+        } else if (cb?.type === 'redacted_thinking') {
+          currentBlock = { type: 'redacted_thinking', data: cb.data || '' };
+        } else if (cb?.type === 'text') {
+          currentBlock = { type: 'text', text: cb.text || '' };
+        } else {
+          currentBlock = null;
         }
         break;
+      }
       case 'content_block_delta':
         if (j.delta?.type === 'text_delta') {
           accContent += j.delta.text;
+          if (currentBlock?.type === 'text') currentBlock.text += j.delta.text;
           onDelta({ content: j.delta.text });
         } else if (j.delta?.type === 'thinking_delta') {
+          if (currentBlock?.type === 'thinking') currentBlock.thinking += j.delta.thinking;
           onDelta({ reasoning: j.delta.thinking });
-        } else if (j.delta?.type === 'input_json_delta' && currentToolUse) {
-          currentToolUse.input += j.delta.partial_json;
+        } else if (j.delta?.type === 'signature_delta') {
+          if (currentBlock?.type === 'thinking') currentBlock.signature += j.delta.signature;
+        } else if (j.delta?.type === 'input_json_delta' && currentBlock?.type === 'tool_use') {
+          currentBlock.input += j.delta.partial_json;
         }
         break;
       case 'content_block_stop':
-        if (currentToolUse) {
-          toolUses.push(currentToolUse);
-          currentToolUse = null;
+        if (currentBlock) {
+          streamBlocks.push(currentBlock);
+          if (currentBlock.type === 'tool_use') toolUses.push(currentBlock);
+          currentBlock = null;
         }
         break;
       case 'message_delta':
@@ -556,11 +598,23 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
   if (toolUses.length && allowTools) {
     const toolResults = await executeAnthropicToolUses(toolUses, { params, signal, onDelta });
     const anthropicContent = [];
-    if (accContent) anthropicContent.push({ type: 'text', text: accContent });
-    for (const t of toolUses) {
-      let parsed = {};
-      try { parsed = JSON.parse(t.input || '{}'); } catch {}
-      anthropicContent.push({ type: 'tool_use', id: t.id, name: t.name, input: parsed });
+    for (const blk of streamBlocks) {
+      if (blk.type === 'thinking') {
+        const tb = { type: 'thinking', thinking: blk.thinking };
+        if (blk.signature) tb.signature = blk.signature;
+        anthropicContent.push(tb);
+      } else if (blk.type === 'redacted_thinking') {
+        anthropicContent.push({ type: 'redacted_thinking', data: blk.data });
+      } else if (blk.type === 'text' && blk.text) {
+        anthropicContent.push({ type: 'text', text: blk.text });
+      } else if (blk.type === 'tool_use') {
+        let parsed = {};
+        try { parsed = JSON.parse(blk.input || '{}'); } catch {}
+        anthropicContent.push({ type: 'tool_use', id: blk.id, name: blk.name, input: parsed });
+      }
+    }
+    if (!anthropicContent.some((b) => b.type === 'text') && accContent) {
+      anthropicContent.unshift({ type: 'text', text: accContent });
     }
     const followMessages = [
       ...messages,
@@ -570,12 +624,7 @@ async function chatAnthropic({ provider, model, system, messages, params, signal
     const nextRes = await chatAnthropic({
       provider, model, system, messages: followMessages, params, signal, onDelta, depth: depth + 1
     });
-    if (usage && nextRes?.usage) {
-      nextRes.usage = {
-        prompt: (usage.prompt || 0) + (nextRes.usage.prompt || 0),
-        completion: (usage.completion || 0) + (nextRes.usage.completion || 0)
-      };
-    }
+    if (nextRes) nextRes.usage = mergeUsage(usage, nextRes.usage);
     return nextRes;
   }
 

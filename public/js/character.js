@@ -172,8 +172,52 @@ export function embedCharaInPng(pngInput, charaJson) {
 }
 
 // ======================= 角色卡规范解析与标准化 =======================
+function normalizeEmbeddedBook(rawBook, charName = '') {
+  if (!rawBook || typeof rawBook !== 'object') return null;
+  const rawEntries = rawBook.entries || rawBook.items;
+  if (!rawEntries) return null;
+  const list = Array.isArray(rawEntries) ? rawEntries : Object.values(rawEntries);
+  const parseKeys = (k) => {
+    if (Array.isArray(k)) return k.map((x) => String(x).trim()).filter(Boolean);
+    if (typeof k === 'string') return k.split(/[,，\n]/).map((x) => x.trim()).filter(Boolean);
+    return [];
+  };
+  const entries = list
+    .filter((e) => e && typeof e === 'object')
+    .map((e, idx) => {
+      const keys = parseKeys(e.keys ?? e.key);
+      const secondary_keys = parseKeys(e.secondary_keys ?? e.secondarykeys ?? e.keysecondary);
+      const rawName = e.comment || e.name || keys[0] || `词条 #${idx + 1}`;
+      return {
+        id: e.id || e.uid || uid(),
+        name: String(rawName).trim() || `词条 #${idx + 1}`,
+        keys,
+        secondary_keys,
+        selective: !!(e.selective || (secondary_keys.length && e.selective !== false)),
+        constant: !!(e.constant || e.always_active),
+        enabled: e.enabled !== false && e.disable !== true,
+        position: e.position || 'after_sys',
+        order: Number.isFinite(Number(e.order ?? e.insertion_order)) ? Number(e.order ?? e.insertion_order) : 100,
+        content: String(e.content ?? '').trim(),
+      };
+    });
+  const rawDepth = rawBook.scan_depth ?? rawBook.scanDepth;
+  const scan_depth = (rawDepth !== undefined && rawDepth !== null && rawDepth !== '' && Number.isFinite(Number(rawDepth)))
+    ? Math.max(0, Math.round(Number(rawDepth)))
+    : 4;
+  return {
+    id: rawBook.id || uid(),
+    name: String(rawBook.name || (charName ? `${charName} 的世界书` : '角色世界书')).trim(),
+    description: String(rawBook.description || '').trim(),
+    scan_depth,
+    token_budget: rawBook.token_budget ?? 2048,
+    recursive_scanning: rawBook.recursive_scanning !== false,
+    entries,
+  };
+}
+
 export function parseCharacterCardJson(raw) {
-  let parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  let parsed = typeof raw === 'string' ? JSON.parse(raw.replace(/^\uFEFF/, '')) : raw;
 
   // 处理包裹在 data 中的 V2 规范 (spec: chara_card_v2) 或 V3
   const isV2OrV3 = (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3') && parsed.data;
@@ -226,21 +270,22 @@ export function parseCharacterCardJson(raw) {
     }
   }
 
+  const charNameStr = String(d.name || '未命名角色').trim() || '未命名角色';
   const chara = {
     id: d.id || uid(),
-    name: (d.name || '未命名角色').trim(),
+    name: charNameStr,
     avatar: d.avatar || '',
     description,
     personality,
     scenario,
     first_mes,
-    alternate_greetings: Array.isArray(d.alternate_greetings) ? d.alternate_greetings.filter(Boolean) : [],
+    alternate_greetings: Array.isArray(d.alternate_greetings) ? d.alternate_greetings.map((s) => String(s)).filter(Boolean) : [],
     mes_example: d.mes_example || '',
     system_prompt: d.system_prompt || '',
     post_history_instructions: d.post_history_instructions || '',
     creator_notes: d.creator_notes || d.creatorcomment || '',
     tags,
-    character_book: d.character_book || null,
+    character_book: normalizeEmbeddedBook(d.character_book, charNameStr),
     creator: d.creator || '',
     character_version: d.character_version || '1.0',
     createdAt: d.createdAt || Date.now(),
@@ -315,14 +360,16 @@ export function exportCharacterCardV2(chara) {
 export function expandCharacterMacros(text, { charName = 'AI', userName = '你', model = '' } = {}) {
   if (!text) return '';
   const now = new Date();
-  return text
-    .replaceAll(/\{\{char\}\}/gi, charName)
-    .replaceAll(/\{\{user\}\}/gi, userName)
-    .replaceAll(/<char>/gi, charName)
-    .replaceAll(/<user>/gi, userName)
-    .replaceAll('{{date}}', now.toLocaleDateString())
-    .replaceAll('{{time}}', now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-    .replaceAll('{{model}}', model || '');
+  const dateStr = now.toLocaleDateString();
+  const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return String(text)
+    .replaceAll(/\{\{char\}\}/gi, () => charName)
+    .replaceAll(/\{\{user\}\}/gi, () => userName)
+    .replaceAll(/<char>/gi, () => charName)
+    .replaceAll(/<user>/gi, () => userName)
+    .replaceAll('{{date}}', () => dateStr)
+    .replaceAll('{{time}}', () => timeStr)
+    .replaceAll('{{model}}', () => model || '');
 }
 
 export function buildCharacterPrompt(chara, opts = {}) {

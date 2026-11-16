@@ -468,10 +468,10 @@
       <div class="field">
         <span data-i18n="smStyleLabel">总结模板风格</span>
         <div class="chips" id="sm_styles" style="margin-bottom:0">
-          <button type="button" data-style="structured" class="active">📋 结构化纪要</button>
-          <button type="button" data-style="bullets">🎯 核心要点</button>
-          <button type="button" data-style="tech">💻 技术与代码复盘</button>
-          <button type="button" data-style="todos">✅ 待办行动项</button>
+          <button type="button" data-style="structured" class="active" data-i18n="smStyleStructured">📋 结构化纪要</button>
+          <button type="button" data-style="bullets" data-i18n="smStyleBullets">🎯 核心要点</button>
+          <button type="button" data-style="tech" data-i18n="smStyleTech">💻 技术与代码复盘</button>
+          <button type="button" data-style="todos" data-i18n="smStyleTodos">✅ 待办行动项</button>
         </div>
       </div>
       <label class="field">
@@ -516,7 +516,7 @@
         <div class="char-top-row">
           <div class="char-avatar-picker">
             <div class="char-avatar-big" id="ch_avatarBox">
-              <img id="ch_avatarImg" alt="Avatar" style="display:none">
+              <img id="ch_avatarImg" alt="Avatar" hidden>
               <span id="ch_avatarFallback">👤</span>
             </div>
             <button class="btn sm" id="btnChangeAvatar" type="button" data-i18n="charAvatarLabel">更换立绘</button>
@@ -537,8 +537,8 @@
           <textarea class="input" id="ch_first_mes" rows="3" placeholder="角色发起的首条问候消息，支持 {{user}} 占位符"></textarea>
         </label>
 
-        <label class="field"><span data-i18n="charAltGreetingsLabel">备选开场白 (每行一句)</span>
-          <textarea class="input" id="ch_alternate_greetings" rows="2" placeholder="可选其他问候语，每行一条"></textarea>
+        <label class="field"><span data-i18n="charAltGreetingsLabel">备选开场白 (用 --- 分隔)</span>
+          <textarea class="input" id="ch_alternate_greetings" rows="2" placeholder="多段备选问候语之间请用单独一行的 --- 分隔"></textarea>
         </label>
 
         <label class="field"><span data-i18n="charDescLabel">角色设定 (description)</span>
@@ -698,7 +698,7 @@
         </label>
 
         <label class="field"><span data-i18n="regexFindLabel">查找正则 (Find Regex)</span>
-          <input class="input" id="rx_find" type="text" placeholder="/&lt;think&gt;[sS]*?&lt;/think&gt;/gi">
+          <input class="input" id="rx_find" type="text" placeholder="/&lt;think&gt;[\s\S]*?&lt;\/think&gt;/gi">
         </label>
 
         <label class="field"><span data-i18n="regexReplaceLabel">替换为 (Replace With)</span>

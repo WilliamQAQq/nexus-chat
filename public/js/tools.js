@@ -92,6 +92,11 @@ export function formatSearchResults(query, results = []) {
   return lines.join('\n');
 }
 
+function withTimeout(signal, ms = 6000) {
+  const t = AbortSignal.timeout(ms);
+  return signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, t]) : (signal || t);
+}
+
 /**
  * 免费客户端 Wikipedia 检索 (支持 zh 和 en，结合词条导言 extracts)
  */
@@ -114,34 +119,40 @@ async function searchWikipedia(query, lang = 'zh', signal) {
   for (const q of candidates) {
     try {
       const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&utf8=&format=json&origin=*&srlimit=4${variantParam}`;
-      const res = await fetch(url, { signal: signal || AbortSignal.timeout(6000) });
+      const res = await fetch(url, { signal: withTimeout(signal, 6000) });
       if (!res.ok) continue;
       const data = await res.json();
       const hits = data.query?.search || [];
       if (!hits.length) continue;
 
-      // 若是包含空格的复合查询，检验首条结果是否与主词相关；若完全不相关且还有更短候选词则继续尝试主词
-      if (q.includes(' ') && candidates.length > 1) {
-        const core = q.split(/\s+/)[0].toLowerCase();
+      // 仅对中文含空格复合查询：若首条结果与所有中文核心词均毫无交集，且还有主词候选，则回退尝试主词
+      if (lang === 'zh' && q.includes(' ') && candidates.length > 1) {
+        const cjkTerms = q.split(/\s+/).filter((w) => /[\u4e00-\u9fa5]{2,}/.test(w));
         const firstText = `${hits[0].title || ''} ${hits[0].snippet || ''}`.toLowerCase();
-        if (core.length >= 2 && !firstText.includes(core.slice(0, 2))) {
+        if (cjkTerms.length && !cjkTerms.some((w) => firstText.includes(w.slice(0, 2).toLowerCase()))) {
           continue;
         }
       }
 
       let pages = {};
+      let titleMap = {};
       try {
         const titles = hits.map((h) => h.title).join('|');
         const extractUrl = `https://${lang}.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${encodeURIComponent(titles)}&format=json&origin=*${variantParam}`;
-        const eRes = await fetch(extractUrl, { signal: signal || AbortSignal.timeout(4000) });
+        const eRes = await fetch(extractUrl, { signal: withTimeout(signal, 4000) });
         if (eRes.ok) {
           const eData = await eRes.json();
           pages = eData.query?.pages || {};
+          for (const n of eData.query?.normalized || []) titleMap[n.from] = n.to;
+          for (const r of eData.query?.redirects || []) titleMap[r.from] = r.to;
         }
       } catch {}
 
+      const pageList = Object.values(pages);
       return hits.map((item) => {
-        const p = Object.values(pages).find((x) => x.title === item.title) || pages[item.pageid];
+        const mappedTitle = titleMap[item.title] || titleMap[titleMap[item.title]] || item.title;
+        const p = pages[item.pageid]
+          || pageList.find((x) => x.title === item.title || x.title === mappedTitle);
         const extract = p?.extract || item.snippet.replace(/<[^>]+>/g, '').trim();
         return {
           title: item.title,
@@ -161,7 +172,7 @@ async function searchWikipedia(query, lang = 'zh', signal) {
 async function searchDDGInstant(query, signal) {
   try {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-    const res = await fetch(url, { signal: signal || AbortSignal.timeout(6000) });
+    const res = await fetch(url, { signal: withTimeout(signal, 6000) });
     if (!res.ok) return [];
     const data = await res.json();
     const results = [];
@@ -216,11 +227,12 @@ async function searchFreeFallback(query, limit = 5, signal) {
  */
 async function searchLocalServer(query, signal) {
   const res = await fetch(`./api/search?q=${encodeURIComponent(query)}`, {
-    signal: signal || AbortSignal.timeout(8000),
+    signal: withTimeout(signal, 8000),
     cache: 'no-store'
   });
   if (!res.ok) throw new Error(`Local search failed HTTP ${res.status}`);
   const data = await res.json();
+  if (data.ok === false && data.error) throw new Error(data.error);
   return (data.results || []).map((r) => ({
     title: r.title,
     snippet: r.snippet,
@@ -428,11 +440,13 @@ export async function searchWeb(query, options = {}) {
     }
   } catch (err) {
     lastError = err;
-    // 若商业或本地搜索失败，自动降级为免费 Wikipedia + DDG，确保永不完全瘫痪
-    try {
-      results = await searchFreeFallback(cleanQuery, limit, signal);
-    } catch {
-      // 保持 lastError
+    // 若非严格连通性测试模式，当商业或本地搜索失败时自动降级为免费 Wikipedia + DDG，确保对话不中断
+    if (!options.strict) {
+      try {
+        results = await searchFreeFallback(cleanQuery, limit, signal);
+      } catch {
+        // 保持 lastError
+      }
     }
   }
 

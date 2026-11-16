@@ -182,6 +182,29 @@ assert.equal(testResult.error, null);
 // Escape sequence (\n) in replaceString + JSON export string check
 const nlRes = testRegexScript({ findRegex: '/\\s*\\|\\s*/g', replaceString: '\\n' }, '第一行 | 第二行');
 assert.equal(nlRes.output, '第一行\n第二行');
+const latexRes = testRegexScript({ findRegex: '/x/g', replaceString: '\\nabla' }, 'x');
+assert.equal(latexRes.output, '\\nabla');
+const nonGlobalCap = testRegexScript({ findRegex: '/(foo)-(bar)/', replaceString: '$2-$1' }, 'foo-bar');
+assert.equal(nonGlobalCap.matchCount, 1);
+assert.ok(compileRegex('   ').error, 'Whitespace findRegex must return error');
+assert.ok(compileRegex('//g').error, 'Empty //g regex must return error');
+
+const lbArrayKey = parseLorebookJson({ name: 'test', scan_depth: 'abc', entries: [{ key: ['dragon'], content: 'Fire' }] });
+assert.equal(lbArrayKey.scan_depth, 5);
+assert.equal(lbArrayKey.entries[0].name, 'dragon');
+
+const stDictCard = parseCharacterCardJson({
+  spec: 'chara_card_v2',
+  data: {
+    name: 'TestChar',
+    character_book: {
+      entries: { "0": { key: ['sword'], content: 'Magic sword', disable: false } }
+    }
+  }
+});
+assert.equal(Array.isArray(stDictCard.character_book.entries), true);
+assert.equal(isLoreEntryTriggered(stDictCard.character_book.entries[0], 'sword'), true);
+
 const exportedRxStr = exportRegexScriptsJson(scripts);
 assert.equal(typeof exportedRxStr, 'string');
 assert.equal(JSON.parse(exportedRxStr).length, 3);

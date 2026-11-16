@@ -55,6 +55,10 @@ const ICONS = {
 };
 const icon = (name) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
 const escapeHtml = (s = '') => String(s).replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+const safeUrl = (u = '') => {
+  const s = String(u || '').trim();
+  return /^https?:\/\//i.test(s) ? escapeHtml(s) : '#';
+};
 
 function hydrateIcons(root = document) {
   root.querySelectorAll('[data-icon]').forEach((el) => { el.innerHTML = icon(el.dataset.icon); });
@@ -368,8 +372,13 @@ function getCompactionSplit(conv) {
 
 function getActiveLorebooks(conv, charObj) {
   const list = (state.lorebooks || []).filter((b) => b.enabled !== false);
-  if (charObj?.character_book && Array.isArray(charObj.character_book.entries)) {
-    list.push(charObj.character_book);
+  const cb = charObj?.character_book;
+  const hasEntries = cb && (Array.isArray(cb.entries) ? cb.entries.length > 0 : (cb.entries && Object.keys(cb.entries).length > 0));
+  if (hasEntries) {
+    const alreadyInState = list.some((b) => (cb.id && b.id === cb.id) || (charObj.id && b.sourceCharId === charObj.id));
+    if (!alreadyInState) {
+      list.push(cb);
+    }
   }
   return list;
 }
@@ -407,13 +416,14 @@ function resolveSystemAndPersona(conv, draftText = '') {
   ].filter(Boolean).join('\n\n');
   const charTokens = (charPrompt ? estimateTokens(charPrompt) : 0) + (postHistoryText ? estimateTokens(postHistoryText) : 0);
   const loreTokens = loreRes?.activeTokens || 0;
-  return { charObj, charPrompt, postHistoryText, charTokens, loreTokens, baseSys, loreRes, fullSystemText };
+  const loreEntryCount = loreRes?.activeEntries?.length || 0;
+  return { charObj, charPrompt, postHistoryText, charTokens, loreTokens, loreEntryCount, baseSys, loreRes, fullSystemText };
 }
 
 function computeContext(conv, draftText = '', draftImages = 0) {
   const p = conv.params;
   const limit = Math.max(512, Number(p.contextWindow) || 128000);
-  const { fullSystemText, postHistoryText, charTokens, loreTokens } = resolveSystemAndPersona(conv, draftText);
+  const { fullSystemText, postHistoryText, charTokens, loreTokens, loreEntryCount, loreRes } = resolveSystemAndPersona(conv, draftText);
   const resolvedSys = fullSystemText;
   const sys = resolvedSys.trim() ? estimateTokens(resolvedSys) + 4 : 0;
   const reserve = p.enabled.max_tokens ? p.max_tokens : 0;
@@ -453,7 +463,7 @@ function computeContext(conv, draftText = '', draftImages = 0) {
   const included = [...compMsgs, ...includedActive];
   const used = sys + compTokens + history + input;
   return {
-    sys, charTokens, loreTokens, postHistoryText, comp: compTokens, history, input, reserve, used, total: used + reserve, limit,
+    sys, charTokens, loreTokens, loreEntryCount, loreEntries: loreRes?.activeEntries || [], postHistoryText, comp: compTokens, history, input, reserve, used, total: used + reserve, limit,
     includedIds: new Set(includedActive.map((m) => m.id)), included,
     includedActiveCount: includedActive.length,
     limitedByCount, trimmedByWindow, manualExcluded, totalMsgs: allNonErr.length,
@@ -772,6 +782,7 @@ function fillMeta(el, m, ctx, isArchived = false, conv = null) {
 function fillContent(el, m) {
   const c = el.querySelector('.msg-content');
   const prevDetails = c.querySelector('details.reasoning');
+  const prevSearchOpen = c.querySelector('details.search-summary-card')?.open ?? false;
   c.replaceChildren();
   if (m.images?.length) {
     const g = document.createElement('div');
@@ -798,7 +809,6 @@ function fillContent(el, m) {
   // 联网搜索结果折叠卡片
   const sources = m.searchSources || m.searchStatus?.results || [];
   if (sources.length) {
-    const prevSearchOpen = c.querySelector('details.search-summary-card')?.open ?? false;
     const card = document.createElement('details');
     card.className = 'search-summary-card';
     card.open = prevSearchOpen;
@@ -807,7 +817,7 @@ function fillContent(el, m) {
     let listHtml = '';
     sources.forEach((s, idx) => {
       listHtml += `<div class="search-source-item">
-        <a class="search-source-title" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer">[${idx + 1}] ${escapeHtml(s.title || s.url)}</a>
+        <a class="search-source-title" href="${safeUrl(s.url)}" target="_blank" rel="noopener noreferrer">[${idx + 1}] ${escapeHtml(s.title || s.url)}</a>
         ${s.snippet ? `<div class="search-source-snippet">${escapeHtml(s.snippet)}</div>` : ''}
       </div>`;
     });
@@ -850,7 +860,7 @@ function fillContent(el, m) {
     const pBar = document.createElement('div');
     pBar.className = 'sources-pills-bar';
     pBar.innerHTML = `<span class="sources-label">${t('sourcesLabel')}:</span>` +
-      sources.map((s, idx) => `<a class="source-pill" href="${escapeHtml(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(s.title || '')}\n${escapeHtml(s.snippet || '')}">[${idx + 1}] ${escapeHtml(s.title || s.url)}</a>`).join('');
+      sources.map((s, idx) => `<a class="source-pill" href="${safeUrl(s.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(s.title || '')}\n${escapeHtml(s.snippet || '')}">[${idx + 1}] ${escapeHtml(s.title || s.url)}</a>`).join('');
     c.append(pBar);
   }
   if (m.error) {
@@ -1091,7 +1101,7 @@ function updateMeter() {
     <div class="ctx-rows">
       <i class="dot" style="background:var(--seg-sys)"></i><span>${t('ctxRowSys')}</span><span class="num">${formatTokens(ctx.sys)}</span>
       ${ctx.charTokens ? `<i></i><span class="dim" style="padding-left:8px">↳ ${t('ctxRowChar')}</span><span class="num dim">${formatTokens(ctx.charTokens)}</span>` : ''}
-      ${ctx.loreTokens ? `<i></i><span class="dim" style="padding-left:8px">↳ ${t('ctxRowLore', '')}</span><span class="num dim">${formatTokens(ctx.loreTokens)}</span>` : ''}
+      ${ctx.loreTokens ? `<i></i><span class="dim" style="padding-left:8px">↳ ${t('ctxRowLore', ctx.loreEntryCount)}</span><span class="num dim">${formatTokens(ctx.loreTokens)}</span>` : ''}
       ${ctx.hasCompaction ? `<i class="dot" style="background:var(--seg-cmp)"></i><span>${t('ctxRowComp', ctx.archivedCount, ctx.savedTokens ? (isEn ? `saves ${formatTokens(ctx.savedTokens)}` : `省 ${formatTokens(ctx.savedTokens)}`) : '')}</span><span class="num">${formatTokens(ctx.comp)}</span>` : ''}
       <i class="dot" style="background:var(--seg-hist)"></i><span>${t('ctxRowHist', ctx.includedActiveCount, ctx.totalMsgs)}</span><span class="num">${formatTokens(ctx.history)}</span>
       <i class="dot" style="background:var(--seg-inp)"></i><span>${t('ctxRowInp')}</span><span class="num">${formatTokens(ctx.input)}</span>
@@ -1109,6 +1119,16 @@ function updateMeter() {
     </div>` : ''}
     <p class="hint">${t('ctxHintFoot', IMAGE_TOKENS)}</p>`;
   setBar(els.ctxDetail.querySelector('.meter-bar'));
+  if (els.loreStatusHint) {
+    els.loreStatusHint.textContent = ctx.loreEntryCount > 0
+      ? t('loreActiveStatus', ctx.loreEntryCount, ctx.loreTokens)
+      : t('loreActiveZeroHint');
+  }
+  if (els.loreActiveChips) {
+    els.loreActiveChips.innerHTML = (ctx.loreEntries || []).map((e) =>
+      `<span class="lore-chip" title="${escapeHtml(e.bookName || '')}">${escapeHtml(e.name || 'Entry')}</span>`
+    ).join('');
+  }
 }
 
 function updateSendBtn() {
@@ -1235,9 +1255,9 @@ async function generate(conv) {
     }
     const ctx = computeContext(conv);
     const history = ctx.included.map((m) => {
-      if (m.images?.length || !m.content) return m;
+      if (!m.content) return { ...m };
       const filtered = applyRegexScripts(m.content, state.settings.regexScripts, PLACEMENT.REQUEST_PROMPT);
-      return filtered === m.content ? m : { ...m, content: filtered };
+      return { ...m, content: filtered };
     });
     const { fullSystemText } = resolveSystemAndPersona(conv);
     const systemText = fullSystemText;
@@ -1261,7 +1281,10 @@ async function generate(conv) {
         if (sRes.results.length && history.length) {
           const lastH = history[history.length - 1];
           if (lastH && lastH.role === 'user') {
-            lastH.content = `${lastH.content}\n\n${sRes.formattedText}`;
+            history[history.length - 1] = {
+              ...lastH,
+              content: `${lastH.content}\n\n${sRes.formattedText}`
+            };
           }
         }
       }
@@ -1395,8 +1418,10 @@ async function onMessageAction(act, msgEl) {
     case 'edit-save':
     case 'edit-send': {
       const val = msgEl.querySelector('.edit-box textarea').value;
-      if (!val.trim() && !m.images?.length) { toast('消息内容不能为空'); return; }
-      m.content = val;
+      if (!val.trim() && !m.images?.length) { toast(t('toastEmptyMsg')); return; }
+      const editScripts = (state.settings.regexScripts || []).filter((s) => s.runOnEdit !== false);
+      const targetPlacement = m.role === 'user' ? PLACEMENT.USER_INPUT : PLACEMENT.AI_OUTPUT;
+      m.content = applyRegexScripts(val, editScripts, targetPlacement);
       delete m.error;
       delete m.stopped;
       state.editingMsgId = null;
@@ -1414,6 +1439,7 @@ async function onMessageAction(act, msgEl) {
       } else {
         saveConvSoon(conv, 0);
         renderMessages();
+        renderExtensionsPanel();
         updateMeter();
       }
       break;
@@ -1488,6 +1514,7 @@ async function testSearchConnectivity() {
     const res = await searchWeb(q, {
       searchSettings: state.settings.searchSettings,
       hasLocalProxy: hasLocalProxy(),
+      strict: true,
       signal: AbortSignal.timeout(10000)
     });
     if (!res.ok && res.error) throw new Error(res.error);
@@ -1498,7 +1525,7 @@ async function testSearchConnectivity() {
     let html = `<div style="font-weight:600;color:var(--accent);margin-bottom:6px">${t('testSearchSuccess', res.results.length)}</div>`;
     res.results.forEach((r, idx) => {
       html += `<div style="margin-bottom:6px;border-bottom:1px dashed var(--border);padding-bottom:4px">
-        <a href="${escapeHtml(r.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-weight:500">[${idx + 1}] ${escapeHtml(r.title || r.url)}</a>
+        <a href="${safeUrl(r.url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none;font-weight:500">[${idx + 1}] ${escapeHtml(r.title || r.url)}</a>
         <div style="color:var(--text-dim);font-size:0.9em">${escapeHtml(r.snippet || '')}</div>
       </div>`;
     });
@@ -2448,7 +2475,7 @@ function selectChar(id) {
   ];
   if (!c) {
     btns.forEach((b) => { if (b) b.disabled = true; });
-    if (els.ch_avatarImg) els.ch_avatarImg.hidden = true;
+    if (els.ch_avatarImg) { els.ch_avatarImg.hidden = true; els.ch_avatarImg.style.display = 'none'; }
     if (els.ch_avatarFallback) { els.ch_avatarFallback.hidden = false; els.ch_avatarFallback.textContent = '👤'; }
     if (els.ch_name) els.ch_name.value = '';
     if (els.ch_tags) els.ch_tags.value = '';
@@ -2468,10 +2495,12 @@ function selectChar(id) {
   if (els.ch_avatarImg && els.ch_avatarFallback) {
     if (c.avatar) {
       els.ch_avatarImg.src = c.avatar;
+      els.ch_avatarImg.style.display = '';
       els.ch_avatarImg.hidden = false;
       els.ch_avatarFallback.hidden = true;
     } else {
       els.ch_avatarImg.hidden = true;
+      els.ch_avatarImg.style.display = 'none';
       els.ch_avatarFallback.hidden = false;
       els.ch_avatarFallback.textContent = c.name.slice(0, 1) || '👤';
     }
@@ -2580,6 +2609,7 @@ function changeAvatar(file) {
     c.avatar = reader.result;
     if (els.ch_avatarImg && els.ch_avatarFallback) {
       els.ch_avatarImg.src = c.avatar;
+      els.ch_avatarImg.style.display = '';
       els.ch_avatarImg.hidden = false;
       els.ch_avatarFallback.hidden = true;
     }
@@ -2603,13 +2633,16 @@ async function importCharFile(file) {
 
     // 若角色卡内嵌了世界书，同时保存一份至独立世界书库供复用
     if (card.character_book && Array.isArray(card.character_book.entries) && card.character_book.entries.length) {
+      const bookId = card.character_book.id || uid();
+      card.character_book.id = bookId;
       const book = {
-        id: uid(),
+        id: bookId,
+        sourceCharId: card.id,
         name: card.character_book.name || `${card.name} 的世界书`,
         description: card.character_book.description || `从角色卡「${card.name}」导入`,
         scan_depth: card.character_book.scan_depth ?? 4,
         token_budget: card.character_book.token_budget ?? 2048,
-        recursive_scanning: !!card.character_book.recursive_scanning,
+        recursive_scanning: card.character_book.recursive_scanning !== false,
         enabled: true,
         entries: card.character_book.entries.map(normalizeLorebookEntry),
       };
@@ -2701,6 +2734,10 @@ function startChatWithChar(id) {
       time: Date.now(),
       model: conv.model,
     });
+  }
+  if (conv === state.draft) {
+    state.convs.push(conv);
+    state.draft = null;
   }
   saveConvSoon(conv, 0);
   if (els.dlgCharacters?.open) els.dlgCharacters.close();
@@ -2912,7 +2949,8 @@ async function saveLoreEntry() {
   e.enabled = els.le_enabled.checked;
   e.constant = els.le_constant.checked;
   e.selective = els.le_selective.checked;
-  e.order = Number(els.le_order.value) || 100;
+  const rawOrder = Number(els.le_order.value);
+  e.order = (els.le_order.value !== '' && Number.isFinite(rawOrder)) ? rawOrder : 100;
   e.content = els.le_content.value;
 
   await db.put('lorebooks', b);
@@ -3322,11 +3360,18 @@ function applyLanguage(langPref) {
     }
   });
 
+  if (els.pf_type?.options?.length) {
+    for (const o of els.pf_type.options) {
+      o.textContent = getProviderTypeName(o.value, resolved);
+    }
+  }
   buildParamList();
   renderPresetSelect();
   renderProviders();
   renderConvList();
   renderHeader();
+  renderPanel();
+  renderMessages();
   updateMeter();
   updateSendBtn();
   updatePlaceholder();
@@ -3429,7 +3474,12 @@ function bindEvents() {
   const comp = els.composer;
   comp.addEventListener('dragover', (e) => { e.preventDefault(); comp.classList.add('drag'); });
   comp.addEventListener('dragleave', () => comp.classList.remove('drag'));
-  comp.addEventListener('drop', (e) => { e.preventDefault(); comp.classList.remove('drag'); addFiles([...e.dataTransfer.files]); });
+  comp.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    comp.classList.remove('drag');
+    addFiles([...e.dataTransfer.files]);
+  });
 
   // 面板：上下文
   const convParam = (fn) => () => { const c = currentConv(); fn(c, c.params); saveConvSoon(c); renderPanel(); renderMessages(); updateMeter(); };
@@ -3851,13 +3901,18 @@ function bindEvents() {
       b.name = els.lb_name.value.trim() || '未命名世界书';
       db.put('lorebooks', b);
       renderLorebookSelect();
+      renderExtensionsPanel();
     }
   });
   els.lb_scanDepth?.addEventListener('input', () => {
     const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
     if (b) {
-      b.scan_depth = Number(els.lb_scanDepth.value) || 4;
+      const rawVal = els.lb_scanDepth.value;
+      const num = Number(rawVal);
+      b.scan_depth = (rawVal !== '' && Number.isFinite(num)) ? Math.max(0, Math.round(num)) : 4;
       db.put('lorebooks', b);
+      renderExtensionsPanel();
+      updateMeter();
     }
   });
   els.loreTestInput?.addEventListener('input', runLoreTester);
@@ -3953,18 +4008,28 @@ function bindEvents() {
   });
   window.addEventListener('drop', async (e) => {
     e.preventDefault();
+    if (e.target?.closest?.('#composer')) return;
     const files = e.dataTransfer?.files;
     if (!files || !files.length) return;
     const file = files[0];
     if (file.name.toLowerCase().endsWith('.png')) {
       try {
-        await importCharFile(file);
+        const buf = await file.arrayBuffer();
+        const chunks = extractPngTextChunks(buf);
+        if (chunks.chara || chunks.ccv3 || chunks.Description) {
+          await importCharFile(file);
+        } else {
+          await addFiles([file]);
+        }
         return;
-      } catch {}
+      } catch {
+        await addFiles([file]);
+        return;
+      }
     } else if (file.name.toLowerCase().endsWith('.json')) {
       try {
         const text = await file.text();
-        const parsed = JSON.parse(text);
+        const parsed = JSON.parse(text.replace(/^\uFEFF/, ''));
 
         // 1. 标准酒馆角色卡 V2 / V3 格式
         if (parsed.spec === 'chara_card_v2' || parsed.spec === 'chara_card_v3' || (parsed.data && parsed.data.name)) {
@@ -3973,7 +4038,7 @@ function bindEvents() {
         }
 
         // 2. 正则脚本列表
-        if (Array.isArray(parsed) && parsed.some((x) => 'findRegex' in x || 'find' in x)) {
+        if (Array.isArray(parsed) && parsed.some((x) => x && typeof x === 'object' && ('findRegex' in x || 'find' in x))) {
           const list = parseRegexScriptsJson(text);
           state.settings.regexScripts.push(...list);
           saveSettings();
@@ -3985,7 +4050,6 @@ function bindEvents() {
 
         // 3. 具备角色设定特征的 AI 档案 JSON (demographics / archetype / physical_traits)
         if (parsed.name && (parsed.demographics || parsed.archetype || parsed.physical_traits || parsed.tactical_and_practical_skills || parsed.dimensional_storage)) {
-          // 自动双向导入：既生成角色卡，又生成结构化世界书
           const charCard = parseCharacterCardJson(text);
           charCard.id = uid();
           state.characters.unshift(charCard);
@@ -3996,6 +4060,7 @@ function bindEvents() {
           const book = parseLorebookJson(text, file.name.replace(/\.json$/i, ''));
           if (book.entries?.length) {
             book.id = uid();
+            book.sourceCharId = charCard.id;
             state.lorebooks.unshift(book);
             await db.put('lorebooks', book);
             state.editingLorebookId = book.id;
@@ -4009,20 +4074,23 @@ function bindEvents() {
           return;
         }
 
-        // 4. 通用世界书 / 设定集 / 术语词典 JSON
-        const book = parseLorebookJson(text, file.name.replace(/\.json$/i, ''));
-        if (book.entries && book.entries.length) {
-          book.id = uid();
-          state.lorebooks.unshift(book);
-          await db.put('lorebooks', book);
-          state.editingLorebookId = book.id;
-          renderLorebookSelect();
-          renderLoreEntryList();
-          renderPanel();
-          updateMeter();
-          toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」（共 ${book.entries.length} 条词条）`);
-          return;
+        // 4. 标准或通用世界书 JSON（需具备 entries/items，否则作为普通 JSON 文本附件加入对话框）
+        if (parsed.entries || parsed.items || Array.isArray(parsed)) {
+          const book = parseLorebookJson(text, file.name.replace(/\.json$/i, ''));
+          if (book.entries && book.entries.length) {
+            book.id = uid();
+            state.lorebooks.unshift(book);
+            await db.put('lorebooks', book);
+            state.editingLorebookId = book.id;
+            renderLorebookSelect();
+            renderLoreEntryList();
+            renderPanel();
+            updateMeter();
+            toast(t('loreImportSuccess', book.name) || `已成功导入世界书「${book.name}」（共 ${book.entries.length} 条词条）`);
+            return;
+          }
         }
+        await addFiles([file]);
       } catch (err) {
         toast('解析 JSON 失败: ' + err.message, 3000);
       }
