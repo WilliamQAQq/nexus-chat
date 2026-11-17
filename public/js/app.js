@@ -339,6 +339,10 @@ function renameConv(conv) {
   const title = prompt(t('renamePromptTitle'), conv.title);
   if (title == null || !title.trim()) return;
   conv.title = title.trim();
+  if (conv === state.draft) {
+    state.convs.push(conv);
+    state.draft = null;
+  }
   saveConvSoon(conv, 0);
   renderConvList();
   renderHeader();
@@ -371,7 +375,12 @@ function getCompactionSplit(conv) {
 }
 
 function getActiveLorebooks(conv, charObj) {
-  const list = (state.lorebooks || []).filter((b) => b.enabled !== false);
+  const list = (state.lorebooks || []).filter((b) => {
+    if (b.enabled === false) return false;
+    // 若该世界书是从特定角色卡内嵌提取出来的专属世界书，仅在当前对话绑定了该角色时生效
+    if (b.sourceCharId) return !!(charObj && b.sourceCharId === charObj.id);
+    return true;
+  });
   const cb = charObj?.character_book;
   const hasEntries = cb && (Array.isArray(cb.entries) ? cb.entries.length > 0 : (cb.entries && Object.keys(cb.entries).length > 0));
   if (hasEntries) {
@@ -516,7 +525,7 @@ function renderConvList() {
 function renderHeader() {
   const conv = currentConv();
   const defaultTitle = t('newChat');
-  if (conv && (!conv.messages.length || conv.title === '新对话' || conv.title === 'New Chat')) {
+  if (conv && (!conv.title || conv.title === '新对话' || conv.title === 'New Chat')) {
     conv.title = defaultTitle;
   }
   els.chatTitle.textContent = conv?.title ?? defaultTitle;
@@ -675,6 +684,13 @@ function renderMessages(forceBottom = false) {
   const prevArcOpen = box.querySelector('details.compact-archive')?.open ?? false;
   const prevCmpEl = box.querySelector('details.compact-banner');
   const prevCmpOpen = prevCmpEl ? prevCmpEl.open : !conv.messages.length;
+  const openReasoningIds = new Set();
+  const openSearchIds = new Set();
+  box.querySelectorAll('.msg[data-id]').forEach((node) => {
+    const mid = node.dataset.id;
+    if (node.querySelector('details.reasoning')?.open) openReasoningIds.add(mid);
+    if (node.querySelector('details.search-summary-card')?.open) openSearchIds.add(mid);
+  });
 
   const ctx = computeContext(conv);
   const inner = document.createElement('div');
@@ -696,7 +712,7 @@ function renderMessages(forceBottom = false) {
     sum.textContent = t('archiveBannerSummary', archived.length);
     const list = document.createElement('div');
     list.className = 'compact-archive-list';
-    archived.forEach((m) => list.append(messageEl(m, conv, ctx, true)));
+    archived.forEach((m) => list.append(messageEl(m, conv, ctx, true, openReasoningIds, openSearchIds)));
     arc.append(sum, list);
     inner.append(arc);
   }
@@ -722,14 +738,14 @@ function renderMessages(forceBottom = false) {
     cb.querySelector('.compact-body').innerHTML = renderMarkdown(comp.summary);
     inner.append(cb);
   }
-  active.forEach((m) => inner.append(messageEl(m, conv, ctx, false)));
+  active.forEach((m) => inner.append(messageEl(m, conv, ctx, false, openReasoningIds, openSearchIds)));
   const prevTop = box.scrollTop;
   box.replaceChildren(inner);
   if (forceBottom || state.stick) box.scrollTop = box.scrollHeight;
   else box.scrollTop = prevTop;
 }
 
-function messageEl(m, conv, ctx, isArchived = false) {
+function messageEl(m, conv, ctx, isArchived = false, openReasoningIds = null, openSearchIds = null) {
   const el = document.createElement('article');
   el.className = `msg ${m.role}`;
   el.dataset.id = m.id;
@@ -745,7 +761,7 @@ function messageEl(m, conv, ctx, isArchived = false) {
     <div class="msg-body"><div class="msg-meta"></div><div class="msg-content"></div><div class="msg-actions"></div></div>`;
   fillMeta(el, m, ctx, isArchived, conv);
   if (state.editingMsgId === m.id) fillEditor(el, m);
-  else fillContent(el, m);
+  else fillContent(el, m, openReasoningIds, openSearchIds);
   fillActions(el, m, isArchived);
   return el;
 }
@@ -779,10 +795,10 @@ function fillMeta(el, m, ctx, isArchived = false, conv = null) {
   if (m.finish === 'length' || m.finish === 'max_tokens' || m.finish === 'MAX_TOKENS') add(t('tagLengthTruncated'), 'tag warn');
 }
 
-function fillContent(el, m) {
+function fillContent(el, m, openReasoningIds = null, openSearchIds = null) {
   const c = el.querySelector('.msg-content');
   const prevDetails = c.querySelector('details.reasoning');
-  const prevSearchOpen = c.querySelector('details.search-summary-card')?.open ?? false;
+  const prevSearchOpen = (c.querySelector('details.search-summary-card')?.open ?? false) || !!(openSearchIds?.has(m.id));
   c.replaceChildren();
   if (m.images?.length) {
     const g = document.createElement('div');
@@ -828,7 +844,7 @@ function fillContent(el, m) {
   if (reasoning) {
     const d = document.createElement('details');
     d.className = 'reasoning';
-    d.open = prevDetails ? prevDetails.open : (m.pending && !content);
+    d.open = prevDetails ? prevDetails.open : (!!(openReasoningIds?.has(m.id)) || !content);
     const sum = document.createElement('summary');
     sum.textContent = m.pending && !content ? t('reasoningThinking') : t('reasoningTitle', formatTokens(estimateTokens(reasoning)));
     const body = document.createElement('div');
@@ -2398,6 +2414,7 @@ async function forkWithSummary() {
   nc.providerId = conv.providerId;
   nc.model = conv.model;
   nc.systemPrompt = conv.systemPrompt;
+  nc.characterId = conv.characterId || null;
   nc.params = clone(conv.params);
   const isDefaultTitle = !conv.title || conv.title === '新对话' || conv.title === 'New Chat';
   nc.title = isDefaultTitle
@@ -2586,6 +2603,17 @@ async function deleteChar(id) {
   if (!c || !confirm(t('confirmDeleteChar', c.name) || `确定删除角色「${c.name}」？`)) return;
   state.characters = state.characters.filter((x) => x.id !== id);
   await db.del('characters', id);
+  // 清理从该角色卡自动提取出的内嵌世界书副本
+  const linkedBooks = state.lorebooks.filter((b) => b.sourceCharId === id);
+  if (linkedBooks.length) {
+    state.lorebooks = state.lorebooks.filter((b) => b.sourceCharId !== id);
+    for (const lb of linkedBooks) await db.del('lorebooks', lb.id);
+    if (linkedBooks.some((b) => b.id === state.editingLorebookId)) {
+      state.editingLorebookId = state.lorebooks[0]?.id || null;
+    }
+    renderLorebookSelect();
+    renderLoreEntryList();
+  }
   const conv = currentConv();
   if (conv && conv.characterId === id) {
     conv.characterId = null;
@@ -2778,13 +2806,27 @@ function onGreetingChange(idx) {
   const greeting = greetings[idx];
   if (!greeting) return;
   conv.greetingIndex = idx;
-  // 若第一条消息为 assistant 欢迎语且尚未继续深度交谈，自动无缝替换为新选择的开场白
-  if (conv.messages.length === 1 && conv.messages[0].role === 'assistant') {
-    conv.messages[0].content = expandCharacterMacros(greeting, {
-      charName: c.name,
-      userName: state.settings.userName || (getLang() === 'en' ? 'User' : '你'),
+  const expandedGreeting = expandCharacterMacros(greeting, {
+    charName: c.name,
+    userName: state.settings.userName || (getLang() === 'en' ? 'User' : '你'),
+    model: conv.model,
+  });
+  // 若当前为空对话，或第一条消息为 assistant 欢迎语且尚未继续深度交谈，自动无缝插入/替换为新选择的开场白
+  if (conv.messages.length === 0) {
+    conv.messages.push({
+      id: uid(),
+      role: 'assistant',
+      content: expandedGreeting,
+      time: Date.now(),
       model: conv.model,
     });
+    if (conv === state.draft) {
+      state.convs.push(conv);
+      state.draft = null;
+      renderConvList();
+    }
+  } else if (conv.messages.length === 1 && conv.messages[0].role === 'assistant') {
+    conv.messages[0].content = expandedGreeting;
   }
   saveConvSoon(conv, 0);
   renderMessages();
@@ -2910,6 +2952,23 @@ function selectLoreEntry(entryId) {
   if (els.le_content) els.le_content.value = e.content || '';
 }
 
+async function syncLinkedCharBook(book) {
+  if (!book?.sourceCharId) return;
+  const c = state.characters.find((x) => x.id === book.sourceCharId);
+  if (!c) return;
+  c.character_book = {
+    ...(c.character_book || {}),
+    id: book.id,
+    name: book.name,
+    description: book.description,
+    scan_depth: book.scan_depth,
+    recursive_scanning: book.recursive_scanning !== false,
+    entries: clone(book.entries || []),
+  };
+  await db.put('characters', c);
+  if (state.editingCharId === c.id) selectChar(c.id);
+}
+
 async function newLoreEntry() {
   const b = state.lorebooks.find((x) => x.id === state.editingLorebookId);
   if (!b) return;
@@ -2931,6 +2990,7 @@ async function newLoreEntry() {
   b.entries.push(ne);
   state.editingLoreEntryId = ne.id;
   await db.put('lorebooks', b);
+  await syncLinkedCharBook(b);
   renderLoreEntryList();
   selectLoreEntry(ne.id);
   if (els.le_name) { els.le_name.focus(); els.le_name.select(); }
@@ -2954,6 +3014,7 @@ async function saveLoreEntry() {
   e.content = els.le_content.value;
 
   await db.put('lorebooks', b);
+  await syncLinkedCharBook(b);
   renderLoreEntryList();
   renderPanel();
   updateMeter();
@@ -2965,6 +3026,7 @@ async function deleteLoreEntry(entryId) {
   if (!b || !entryId) return;
   b.entries = b.entries.filter((x) => x.id !== entryId);
   await db.put('lorebooks', b);
+  await syncLinkedCharBook(b);
   state.editingLoreEntryId = b.entries[0]?.id || null;
   renderLoreEntryList();
   selectLoreEntry(state.editingLoreEntryId);
@@ -3001,6 +3063,14 @@ async function deleteLorebook(id) {
   if (!b || !confirm(t('confirmDeleteLorebook', b.name) || `确定删除世界书「${b.name}」？`)) return;
   state.lorebooks = state.lorebooks.filter((x) => x.id !== id);
   await db.del('lorebooks', id);
+  if (b.sourceCharId) {
+    const c = state.characters.find((x) => x.id === b.sourceCharId);
+    if (c) {
+      c.character_book = null;
+      await db.put('characters', c);
+      if (state.editingCharId === c.id) selectChar(c.id);
+    }
+  }
   state.editingLorebookId = state.lorebooks[0]?.id || null;
   renderLorebookSelect();
   renderLoreEntryList();
@@ -3310,10 +3380,10 @@ function autosize() {
 
 
 // ======================= 国际化 / i18n =======================
-function applyLanguage(langPref) {
+function applyLanguage(langPref, persist = true) {
   const resolved = setLang(langPref);
   if (state?.settings) state.settings.language = langPref;
-  saveSettings();
+  if (persist) saveSettings();
 
   if (els.btnLang) {
     els.btnLang.textContent = resolved === 'en' ? '中' : 'EN';
@@ -3834,9 +3904,7 @@ function bindEvents() {
     if (e.key === SKEY) {
       state.settings = loadSettings();
       applyTheme();
-      renderHeader();
-      renderPanel();
-      if (!currentConv()?.messages.length) renderMessages();
+      applyLanguage(state.settings.language || 'auto', false);
     }
   });
   addEventListener('keydown', (e) => {
@@ -3900,6 +3968,7 @@ function bindEvents() {
     if (b) {
       b.name = els.lb_name.value.trim() || '未命名世界书';
       db.put('lorebooks', b);
+      syncLinkedCharBook(b);
       renderLorebookSelect();
       renderExtensionsPanel();
     }
@@ -3911,6 +3980,7 @@ function bindEvents() {
       const num = Number(rawVal);
       b.scan_depth = (rawVal !== '' && Number.isFinite(num)) ? Math.max(0, Math.round(num)) : 4;
       db.put('lorebooks', b);
+      syncLinkedCharBook(b);
       renderExtensionsPanel();
       updateMeter();
     }
@@ -3926,6 +3996,7 @@ function bindEvents() {
     if (tog) {
       entry.enabled = tog.checked;
       db.put('lorebooks', b);
+      syncLinkedCharBook(b);
       renderExtensionsPanel();
       updateMeter();
     } else {
@@ -4123,7 +4194,7 @@ function updatePlaceholder() {
 async function init() {
   hydrateIcons();
   applyTheme();
-  applyLanguage(state.settings.language || 'auto');
+  applyLanguage(state.settings.language || 'auto', false);
   await detectLocalProxy();
   renderPresetSelect();
   buildParamList();
